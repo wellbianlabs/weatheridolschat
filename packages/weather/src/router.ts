@@ -1,6 +1,6 @@
 import type { GeoPoint } from '@wi/core/weather';
 
-import { KWeatherProvider } from './providers/kweather';
+import { createKWeatherProvider } from './providers/kweather';
 import { MockWeatherProvider } from './providers/mock';
 import { createOpenWeatherMapProvider } from './providers/openweathermap';
 import type { WeatherProvider } from './providers/types';
@@ -25,9 +25,12 @@ export interface WeatherRouterOptions {
 
 export function pickProvider(point: GeoPoint, opts: WeatherRouterOptions): WeatherProvider {
   if (opts.mockMode) return MockWeatherProvider;
+  // KR coordinates with KMA key → use KMA (free, gov-grade accuracy)
+  if (isInKorea(point) && opts.kweatherApiKey) {
+    return createKWeatherProvider(opts.kweatherApiKey);
+  }
   if (opts.openWeatherMapApiKey) {
     return createOpenWeatherMapProvider(opts.openWeatherMapApiKey);
   }
-  if (isInKorea(point) && opts.kweatherApiKey) return KWeatherProvider;
   return MockWeatherProvider;
 }

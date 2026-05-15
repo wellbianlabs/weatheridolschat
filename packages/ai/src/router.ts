@@ -1,8 +1,9 @@
 import { createClaudeAdapter } from './adapters/claude';
 import { createGeminiAdapter } from './adapters/gemini';
-import { MockChatAdapter, MockImageAdapter } from './adapters/mock';
+import { MockChatAdapter, MockImageAdapter, MockMusicAdapter } from './adapters/mock';
 import { createOpenAIImageAdapter } from './adapters/openai-image';
-import type { AdapterTier, ChatAdapter, ImageAdapter } from './types';
+import { createSunoAdapter } from './adapters/suno';
+import type { AdapterTier, ChatAdapter, ImageAdapter, MusicAdapter } from './types';
 
 export interface RouterOptions {
   tier: AdapterTier;
@@ -47,4 +48,16 @@ export function pickImageAdapter(opts: {
   if (opts.mockMode) return MockImageAdapter;
   if (opts.openaiApiKey) return createOpenAIImageAdapter(opts.openaiApiKey);
   return MockImageAdapter;
+}
+
+export function pickMusicAdapter(opts: {
+  mockMode?: boolean;
+  sunoApiKey?: string;
+  sunoBaseUrl?: string;
+}): MusicAdapter {
+  if (opts.mockMode) return MockMusicAdapter;
+  if (opts.sunoApiKey) {
+    return createSunoAdapter({ apiKey: opts.sunoApiKey, baseUrl: opts.sunoBaseUrl });
+  }
+  return MockMusicAdapter;
 }
