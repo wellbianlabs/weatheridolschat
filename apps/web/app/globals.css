@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --font-display: 'Playfair Display', 'Pretendard Variable', Georgia, serif;
+  --font-sans: 'Inter', 'Pretendard Variable', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+html,
+body {
+  min-height: 100%;
+  background: #fffaf3;
+  color: #241b3e;
+  font-family: var(--font-sans);
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  word-break: keep-all;
+  overflow-wrap: break-word;
+}
+
+* {
+  box-sizing: border-box;
+  /* Never italicize — even when CSS would inherit it. */
+  font-style: normal !important;
+}
+
+::selection {
+  background: #f49abe;
+  color: #ffffff;
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+/* Dreamy paper-to-sky gradient (left cream → right pastel sky) */
+.bg-dreamy {
+  background:
+    radial-gradient(ellipse 60% 50% at 80% 30%, rgba(122, 165, 207, 0.25), transparent 60%),
+    radial-gradient(ellipse 50% 40% at 15% 70%, rgba(244, 154, 190, 0.18), transparent 65%),
+    linear-gradient(120deg, #fffaf3 0%, #fff4ea 35%, #f4ecfa 70%, #e6f0fb 100%);
+}
+
+.bg-dreamy-vertical {
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 0%, rgba(244, 154, 190, 0.18), transparent 60%),
+    linear-gradient(180deg, #fffaf3 0%, #f4ecfa 60%, #e6f0fb 100%);
+}
+
+/* Soft refined scrollbar */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(36, 27, 62, 0.15);
+  border-radius: 9999px;
+  border: 2px solid #fffaf3;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(36, 27, 62, 0.28);
+}
+
+html {
+  scroll-behavior: smooth;
+}

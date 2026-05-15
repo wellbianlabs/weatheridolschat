@@ -1,0 +1,14 @@
+{
+  "app.name": "天気のアイドル",
+  "onboarding.welcome": "今日の天気、誰と話したい？",
+  "onboarding.nickname": "ニックネーム",
+  "onboarding.location.allow": "位置情報を許可",
+  "characters.title": "今日は誰と話す？",
+  "chat.composer.placeholder": "メッセージを入力",
+  "chat.empty": "{character}に挨拶してみよう",
+  "paywall.title": "{character}ともっと深く",
+  "paywall.cta": "月¥980で始める",
+  "paywall.waitlist": "リリース通知を受け取る",
+  "error.network": "ネットワークエラー — 再度お試しください",
+  "rate_limit.daily": "今日の無料チャットは終わりました"
+}

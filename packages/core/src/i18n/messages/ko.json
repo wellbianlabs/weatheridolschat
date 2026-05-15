@@ -1,0 +1,14 @@
+{
+  "app.name": "날씨의 아이돌",
+  "onboarding.welcome": "오늘 날씨, 누구랑 이야기할래?",
+  "onboarding.nickname": "닉네임",
+  "onboarding.location.allow": "위치 권한 허용",
+  "characters.title": "오늘 누구랑 얘기할까?",
+  "chat.composer.placeholder": "메시지를 입력하세요",
+  "chat.empty": "{character}에게 첫인사 해볼까?",
+  "paywall.title": "{character}랑 더 깊게 이야기하려면",
+  "paywall.cta": "월 9,900원으로 시작",
+  "paywall.waitlist": "출시 알림 받기",
+  "error.network": "네트워크 오류 — 다시 시도해주세요",
+  "rate_limit.daily": "오늘 무료 대화가 끝났어요"
+}

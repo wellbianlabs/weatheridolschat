@@ -1,0 +1,9 @@
+{
+  "extends": "@wi/config/tsconfig/base",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*"]
+}

@@ -1,0 +1,14 @@
+{
+  "app.name": "Weather Idols",
+  "onboarding.welcome": "Who do you want to talk to about today's weather?",
+  "onboarding.nickname": "Nickname",
+  "onboarding.location.allow": "Allow location access",
+  "characters.title": "Who are you in the mood for today?",
+  "chat.composer.placeholder": "Type a message",
+  "chat.empty": "Say hi to {character}!",
+  "paywall.title": "Go deeper with {character}",
+  "paywall.cta": "Start at $7.99/mo",
+  "paywall.waitlist": "Join the waitlist",
+  "error.network": "Network error — please try again",
+  "rate_limit.daily": "You've reached today's free message limit"
+}
