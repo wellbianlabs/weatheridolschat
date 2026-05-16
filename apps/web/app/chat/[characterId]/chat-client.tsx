@@ -19,6 +19,15 @@ interface MusicTrack {
   lyrics?: string;
   status: 'queued' | 'streaming' | 'done' | 'failed';
   error?: string;
+  /** Epoch ms when the task started (POST /api/music returned). Used to
+   *  drive the progress bar — Suno doesn't expose a real percentage. */
+  startedAt?: number;
+  /** Number of GET /api/music poll attempts so far. Helps the user tell
+   *  "actively working" from "stuck waiting". */
+  pollCount?: number;
+  /** True while the polling loop is still active. Lets the card show a
+   *  cancel button only when cancellation is meaningful. */
+  active?: boolean;
 }
 interface UIMessage {
   id: string;
@@ -117,6 +126,9 @@ export default function ChatClient({ character }: { character: Character }) {
   const [usage, setUsage] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const lastUserMessageRef = useRef<string | null>(null);
+  // Per-song AbortControllers so the "취소" button on the music card can
+  // stop the polling loop without affecting other in-flight songs.
+  const songAbortersRef = useRef<Record<string, AbortController>>({});
 
   useEffect(() => {
     setNickname(localStorage.getItem('wi.nickname') ?? '친구');
@@ -146,27 +158,65 @@ export default function ChatClient({ character }: { character: Character }) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages]);
 
+  /** Cancel an in-flight song generation (user pressed 취소 on the card). */
+  function cancelSong(songId: string) {
+    songAbortersRef.current[songId]?.abort();
+    delete songAbortersRef.current[songId];
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === songId && m.music
+          ? {
+              ...m,
+              pending: false,
+              music: {
+                ...m.music,
+                status: 'failed',
+                active: false,
+                error: '취소했어요.',
+              },
+            }
+          : m,
+      ),
+    );
+  }
+
   /**
-   * Kick off a Suno weather-song generation and poll until it returns
-   * a playable URL. The card stays mounted in the chat the whole time —
-   * we update the underlying message's `music` field as state moves
-   * queued → streaming → done so the UI can show the right copy.
+   * Kick off a Suno weather-song generation and poll until it returns a
+   * playable URL. The chat card stays mounted the whole time — we update
+   * the underlying message's `music` field as state moves
+   *
+   *   queued (작사 중) → streaming (녹음 중) → done (재생 가능)
+   *
+   * so the UI can show the right copy and a synthetic progress bar.
+   * Suno doesn't expose a real percentage; we derive one from elapsed
+   * time + stage so the user can tell the task is alive vs stuck.
    */
   async function generateWeatherSong(songId: string, userText: string) {
-    const updateMusic = (patch: Partial<MusicTrack>, pending: boolean) =>
+    const startedAt = Date.now();
+    const aborter = new AbortController();
+    songAbortersRef.current[songId] = aborter;
+
+    const updateMusic = (patch: Partial<MusicTrack>, active: boolean) =>
       setMessages((prev) =>
         prev.map((m) =>
           m.id === songId
             ? {
                 ...m,
-                pending,
-                music: { ...(m.music ?? { taskId: '', status: 'queued' }), ...patch },
+                pending: active,
+                music: {
+                  ...(m.music ?? { taskId: '', status: 'queued' }),
+                  startedAt,
+                  active,
+                  ...patch,
+                },
               }
             : m,
         ),
       );
 
-    // Kickoff
+    updateMusic({ status: 'queued', pollCount: 0 }, true);
+
+    // ── Kickoff ─────────────────────────────────────────────────────
     let kickoff: {
       taskId?: string;
       title?: string;
@@ -184,19 +234,24 @@ export default function ChatClient({ character }: { character: Character }) {
           userPrompt: userText,
           title: `${character.displayName}의 오늘 날씨송`,
         }),
+        signal: aborter.signal,
       });
       kickoff = await res.json();
       if (!res.ok || !kickoff.taskId) {
         const reason = kickoff.error?.message ?? `HTTP ${res.status}`;
         updateMusic({ status: 'failed', error: truncate(reason, 140) }, false);
+        delete songAbortersRef.current[songId];
         return;
       }
     } catch (err) {
-      updateMusic({ status: 'failed', error: truncate((err as Error).message, 120) }, false);
+      if ((err as Error).name !== 'AbortError') {
+        updateMusic({ status: 'failed', error: truncate((err as Error).message, 120) }, false);
+      }
+      delete songAbortersRef.current[songId];
       return;
     }
 
-    // First result might already be 'done' (Mock adapter is synchronous).
+    // First response might already be 'done' (Mock adapter is synchronous).
     updateMusic(
       {
         taskId: kickoff.taskId,
@@ -207,15 +262,27 @@ export default function ChatClient({ character }: { character: Character }) {
       },
       kickoff.status !== 'done',
     );
-    if (kickoff.status === 'done' && kickoff.audioUrl) return;
+    if (kickoff.status === 'done' && kickoff.audioUrl) {
+      delete songAbortersRef.current[songId];
+      return;
+    }
 
-    // Poll Suno every 4s, max ~3min. Suno typically finishes in 20–60s.
+    // ── Polling loop ────────────────────────────────────────────────
+    // 90s deadline — Suno's p99 is ~80s. Beyond that we surface a
+    // honest "still working" error so the user isn't stuck staring at a
+    // pulsing card forever. Polling interval: 3s (a bit tighter than
+    // before so the progress bar feels responsive).
     const taskId = kickoff.taskId;
-    const deadline = Date.now() + 3 * 60_000;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 4000));
+    const deadline = startedAt + 90_000;
+    let pollCount = 0;
+    while (Date.now() < deadline && !aborter.signal.aborted) {
+      await new Promise((r) => setTimeout(r, 3000));
+      if (aborter.signal.aborted) return;
+      pollCount += 1;
       try {
-        const r = await fetch(`/api/music?taskId=${encodeURIComponent(taskId)}`);
+        const r = await fetch(`/api/music?taskId=${encodeURIComponent(taskId)}`, {
+          signal: aborter.signal,
+        });
         const d = (await r.json()) as {
           status?: MusicTrack['status'];
           audioUrl?: string;
@@ -225,9 +292,14 @@ export default function ChatClient({ character }: { character: Character }) {
         };
         if (!r.ok) {
           updateMusic(
-            { status: 'failed', error: truncate(d.error?.message ?? `HTTP ${r.status}`, 140) },
+            {
+              status: 'failed',
+              error: truncate(d.error?.message ?? `HTTP ${r.status}`, 140),
+              pollCount,
+            },
             false,
           );
+          delete songAbortersRef.current[songId];
           return;
         }
         updateMusic(
@@ -236,18 +308,29 @@ export default function ChatClient({ character }: { character: Character }) {
             audioUrl: d.audioUrl,
             title: d.title,
             lyrics: d.lyrics,
+            pollCount,
           },
           d.status !== 'done' && d.status !== 'failed',
         );
-        if (d.status === 'done' || d.status === 'failed') return;
-      } catch {
+        if (d.status === 'done' || d.status === 'failed') {
+          delete songAbortersRef.current[songId];
+          return;
+        }
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') return;
         // Transient network blip — keep polling until deadline.
+        updateMusic({ pollCount }, true);
       }
     }
     updateMusic(
-      { status: 'failed', error: '시간이 초과됐어. 잠시 후 다시 시도해줘.' },
+      {
+        status: 'failed',
+        error: '90초 동안 응답이 없어서 멈췄어요. 잠시 후 다시 시도해줘.',
+        pollCount,
+      },
       false,
     );
+    delete songAbortersRef.current[songId];
   }
 
   async function send(text: string) {
@@ -533,6 +616,7 @@ export default function ChatClient({ character }: { character: Character }) {
                   accent={character.accentColor}
                   from={character.displayName}
                   weatherLabel={weather ? WEATHER_LABEL[weather.condition] ?? weather.condition : ''}
+                  onCancel={() => cancelSong(m.id)}
                 />
               ) : (
                 <ChatBubble
@@ -709,50 +793,77 @@ function ChatBubble({
 }
 
 /**
- * Music card for the 날씨송 feature. Renders a gradient album-cover
- * placeholder using the character's accent color, plus state-aware copy
- * for the long-running Suno task:
+ * Music card for the 날씨송 feature.
  *
- *   queued    → "작사하는 중…"        (animated dots, no audio yet)
- *   streaming → "녹음하는 중…"        (animated dots, no audio yet)
- *   done      → audio <audio controls> + collapsible lyrics
- *   failed    → friendly error + the underlying reason in parens
+ *   queued    → "작사하는 중"  (progress bar + elapsed seconds + cancel)
+ *   streaming → "녹음하는 중"  (progress bar + elapsed seconds + cancel)
+ *   done      → audio player + collapsible lyrics
+ *   failed    → friendly error + the underlying reason
  *
- * Status copy is in present continuous Korean so it feels like the
- * character is actually working on the song right now ("작사 중" reads
- * differently than "loading…").
+ * Suno doesn't expose a real percentage. We derive one from elapsed time
+ * + stage so the bar feels alive:
+ *   - 0–60% of bar maps to the 'queued' stage over ~30s
+ *   - 60–95% maps to the 'streaming' stage
+ *   - 100% jumps the moment status becomes 'done'
+ * If the user sees "30초 · 작sa 중" and the bar moving, they know the
+ * task is live. If polls stop ticking, they can hit 취소.
  */
 function WeatherSongCard({
   track,
   accent,
   from,
   weatherLabel,
+  onCancel,
 }: {
   track: MusicTrack;
   accent: string;
   from: string;
   weatherLabel: string;
+  onCancel: () => void;
 }) {
   const [lyricsOpen, setLyricsOpen] = useState(false);
+  // Tick once a second so elapsed time + progress bar refresh while the
+  // task is in flight. Stops ticking once the track is terminal.
+  const [, setTick] = useState(0);
+  const isActive = track.active && (track.status === 'queued' || track.status === 'streaming');
+  useEffect(() => {
+    if (!isActive) return;
+    const id = window.setInterval(() => setTick((n) => n + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [isActive]);
+
   const title = track.title ?? `${from}의 오늘 날씨송`;
   const subtitle = weatherLabel ? `${weatherLabel} · ${from}` : from;
+  const elapsedSec = track.startedAt
+    ? Math.max(0, Math.round((Date.now() - track.startedAt) / 1000))
+    : 0;
+
+  // Synthetic progress bar percentage.
+  //   queued: 0 → 60% over 30s
+  //   streaming: 60 → 95% over the next 30s
+  //   done: 100% instantly
+  //   failed: keep last value (bar fades to ink-soft)
+  let pct = 0;
+  if (track.status === 'done') pct = 100;
+  else if (track.status === 'failed') pct = Math.min(95, (elapsedSec / 30) * 60);
+  else if (track.status === 'queued') pct = Math.min(60, (elapsedSec / 30) * 60);
+  else if (track.status === 'streaming')
+    pct = Math.min(95, 60 + ((elapsedSec - 30) / 30) * 35);
 
   let statusCopy = '';
   if (track.status === 'queued') statusCopy = '작사하는 중';
   else if (track.status === 'streaming') statusCopy = '녹음하는 중';
+  else if (track.status === 'done') statusCopy = '완성!';
   else if (track.status === 'failed') statusCopy = '실패';
 
   return (
     <div className="w-full max-w-[320px] overflow-hidden rounded-2xl bg-white shadow-md">
-      {/* Album-cover style header — gradient backdrop in character accent. */}
+      {/* Album-cover style header */}
       <div
         className="relative h-32 w-full"
-        style={{
-          background: `linear-gradient(135deg, ${accent} 0%, #241b3e 100%)`,
-        }}
+        style={{ background: `linear-gradient(135deg, ${accent} 0%, #241b3e 100%)` }}
       >
-        {/* Soft sheen sweep while generating */}
-        {track.status !== 'done' && track.status !== 'failed' ? (
+        {isActive ? (
           <div
             aria-hidden
             className="absolute inset-0 animate-sheen-sweep"
@@ -781,7 +892,6 @@ function WeatherSongCard({
           {subtitle}
         </div>
 
-        {/* Body: dots+copy while pending, audio+lyrics once done, error otherwise */}
         {track.status === 'done' && track.audioUrl ? (
           <div className="space-y-2 pt-1">
             {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
@@ -808,21 +918,61 @@ function WeatherSongCard({
             노래를 만들지 못했어. {track.error ? `(${track.error})` : ''}
           </p>
         ) : (
-          <div className="flex items-center gap-2 pt-1">
-            <span className="inline-flex items-center gap-1">
-              {[0, 160, 320].map((delay) => (
-                <span
-                  key={delay}
-                  className="inline-block h-1.5 w-1.5 animate-typing-bounce rounded-full"
-                  style={{ background: accent, animationDelay: `${delay}ms` }}
-                />
-              ))}
-            </span>
-            <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
-              {statusCopy}
-            </span>
-          </div>
+          <SongProgress
+            pct={pct}
+            statusCopy={statusCopy}
+            elapsedSec={elapsedSec}
+            pollCount={track.pollCount ?? 0}
+            accent={accent}
+            onCancel={onCancel}
+          />
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Progress UI for an in-flight song: a thin horizontal bar tinted to the
+ * character's accent, plus a meta line that shows stage + elapsed time +
+ * poll count + a Cancel button. The poll count is what tells the user
+ * "we're still talking to Suno" vs "we're stuck" — if it doesn't tick up
+ * for ~10 seconds, something's wrong.
+ */
+function SongProgress({
+  pct,
+  statusCopy,
+  elapsedSec,
+  pollCount,
+  accent,
+  onCancel,
+}: {
+  pct: number;
+  statusCopy: string;
+  elapsedSec: number;
+  pollCount: number;
+  accent: string;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="space-y-2 pt-1">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-brand-ink/10">
+        <div
+          className="h-full rounded-full transition-[width] duration-500 ease-out"
+          style={{ width: `${Math.max(4, Math.round(pct))}%`, background: accent }}
+        />
+      </div>
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
+          {statusCopy} · {elapsedSec}초 · {pollCount}회 확인
+        </span>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
+        >
+          취소
+        </button>
       </div>
     </div>
   );
