@@ -56,7 +56,7 @@ export function createOpenAIImageAdapter(apiKey: string): ImageAdapter {
         const t0 = Date.now();
         let referenceBuffer: Buffer;
         try {
-          referenceBuffer = await fetchImageBuffer(input.referenceImageUrl);
+          referenceBuffer = await fetchImageBuffer(input.referenceImageUrl, input.requestOrigin);
         } catch (err) {
           const reason = (err as Error).message;
           console.error(`[oai-image] ref load FAIL ${reason}`);
@@ -143,12 +143,26 @@ export function createOpenAIImageAdapter(apiKey: string): ImageAdapter {
 /**
  * Read a reference image into a Buffer.
  *
- * For relative URLs ("/reference/sunny.png") we read from disk — Vercel
- * bundles `public/` into the lambda working dir, so this avoids any
- * dependency on `NEXT_PUBLIC_APP_URL` being reachable from the function.
- * Absolute URLs still use HTTP (for CDN-hosted references later).
+ * Tries three strategies in order so we work across local dev, Vercel
+ * preview deployments, and Vercel production — each of which presents
+ * static files differently:
+ *
+ *   1. Absolute http(s) URL → fetch directly.
+ *   2. Relative path → read from `process.cwd()/public/<path>`. This
+ *      works on Vercel ONLY if `outputFileTracingIncludes` (see
+ *      next.config.mjs) bundles the file into the lambda; otherwise
+ *      ENOENT.
+ *   3. Relative path + `requestOrigin` → HTTP fetch against the host
+ *      the user just connected to. This is the safety net for cases
+ *      where the file isn't traced into the bundle — using the request
+ *      origin avoids any dependency on `NEXT_PUBLIC_APP_URL` (which is
+ *      easy to mis-set across preview/prod URLs).
+ *
+ * Each failure is logged so Vercel runtime logs distinguish which layer
+ * fell through and why.
  */
-async function fetchImageBuffer(url: string): Promise<Buffer> {
+async function fetchImageBuffer(url: string, requestOrigin?: string): Promise<Buffer> {
+  // Strategy 1: explicit absolute URL.
   if (url.startsWith('http')) {
     try {
       const res = await fetch(url);
@@ -160,15 +174,41 @@ async function fetchImageBuffer(url: string): Promise<Buffer> {
       );
     }
   }
+
   const rel = url.startsWith('/') ? url.slice(1) : url;
+
+  // Strategy 2: filesystem read from the lambda working dir.
   const filePath = path.join(process.cwd(), 'public', rel);
   try {
-    return await readFile(filePath);
+    const buf = await readFile(filePath);
+    console.info(`[oai-image] ref via disk path=${filePath} bytes=${buf.length}`);
+    return buf;
   } catch (err) {
-    throw new Error(
-      `Failed to read reference image from disk (${filePath}): ${(err as Error).message}`,
+    console.warn(
+      `[oai-image] disk read failed cwd=${process.cwd()} path=${filePath} err=${(err as Error).message}`,
     );
+    // fall through to HTTP fallback if we have an origin
   }
+
+  // Strategy 3: HTTP fetch against the request's own host.
+  if (requestOrigin) {
+    const httpUrl = `${requestOrigin}${url.startsWith('/') ? '' : '/'}${url}`;
+    try {
+      const res = await fetch(httpUrl);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = Buffer.from(await res.arrayBuffer());
+      console.info(`[oai-image] ref via http url=${httpUrl} bytes=${buf.length}`);
+      return buf;
+    } catch (err) {
+      throw new Error(
+        `Reference image unavailable. Tried disk(${filePath}) and http(${httpUrl}): ${(err as Error).message}`,
+      );
+    }
+  }
+
+  throw new Error(
+    `Reference image unavailable. Disk read failed at ${filePath} and no requestOrigin provided for HTTP fallback.`,
+  );
 }
 
 function extractImageUrl(result: {

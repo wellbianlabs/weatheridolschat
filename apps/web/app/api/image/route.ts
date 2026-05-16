@@ -45,8 +45,12 @@ export async function POST(req: Request): Promise<Response> {
     openWeatherMapApiKey,
   });
   const adapter = pickImageAdapter({ mockMode, openaiApiKey });
+  // Use the inbound request's origin as a guaranteed-reachable fallback
+  // when the lambda can't read the bundled reference image from disk —
+  // more reliable than NEXT_PUBLIC_APP_URL which often points elsewhere.
+  const requestOrigin = new URL(req.url).origin;
   console.info(
-    `[image-api] start character=${character.id} adapter=${adapter.id} mockMode=${mockMode} hasOpenAI=${!!openaiApiKey} weather=${weather.condition}`,
+    `[image-api] start character=${character.id} adapter=${adapter.id} mockMode=${mockMode} hasOpenAI=${!!openaiApiKey} weather=${weather.condition} origin=${requestOrigin}`,
   );
 
   const t0 = Date.now();
@@ -57,6 +61,7 @@ export async function POST(req: Request): Promise<Response> {
       userPrompt: body.userPrompt ?? '',
       intent: body.intent ?? 'selfie',
       referenceImageUrl: character.referenceImageUrl,
+      requestOrigin,
     });
     console.info(
       `[image-api] OK model=${result.model} ms=${Date.now() - t0} adapter=${adapter.id}`,

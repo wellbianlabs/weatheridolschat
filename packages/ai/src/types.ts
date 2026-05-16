@@ -25,10 +25,16 @@ export interface ImageAdapterInput {
   weather: WeatherSnapshot;
   userPrompt: string;
   intent: 'selfie' | 'scene' | 'outfit';
-  /** Absolute URL of the character's face reference image. When provided to
-   * a real adapter (OpenAI), the adapter fetches the image and passes it as
-   * the reference for visual consistency. */
+  /** Absolute URL or relative path of the character's face reference image.
+   * Relative paths (e.g. '/reference/sunny.png') are resolved against the
+   * app's filesystem first, falling back to HTTP via `requestOrigin`. */
   referenceImageUrl?: string;
+  /** The origin of the inbound request (e.g. `https://<deploy>.vercel.app`).
+   * Used as a guaranteed-reachable HTTP fallback when the bundled
+   * reference file isn't available — passing the host the client just
+   * connected to is more reliable than env-var-based `NEXT_PUBLIC_APP_URL`,
+   * which is frequently mis-set on Vercel previews. */
+  requestOrigin?: string;
 }
 
 export interface ImageAdapterResult {

@@ -11,7 +11,19 @@ const nextConfig = {
     '@wi/config',
   ],
   experimental: {
-    // Server Actions are enabled by default in 14.x
+    // Server Actions are enabled by default in 14.x.
+    //
+    // Next.js 14 traces only the files reachable through imports when it
+    // bundles a serverless function. Static assets in `public/` are
+    // served by the edge layer and are NOT included in the lambda
+    // working dir by default — so `fs.readFile(process.cwd() +
+    // '/public/...')` from /api/image throws ENOENT on Vercel. We
+    // explicitly include the character reference photos so the selfie
+    // generator can read them off disk without going through HTTP (and
+    // without depending on NEXT_PUBLIC_APP_URL being correctly set).
+    outputFileTracingIncludes: {
+      '/api/image': ['./public/reference/*.png'],
+    },
   },
   images: {
     remotePatterns: [
