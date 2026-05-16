@@ -144,6 +144,13 @@ export function createSunoAdapter(opts: {
         `[suno] status taskId=${taskId} suno=${r?.status ?? '?'} normalized=${status} hasAudio=${!!(clip?.audioUrl ?? clip?.streamAudioUrl)}`,
       );
 
+      // sunoapi.org puts the actual sung lyrics under `prompt` in custom
+      // mode, but Suno-compatible providers sometimes also use `lyric`,
+      // `lyrics`, or `text`. Try them in priority order so we never lose
+      // the lyrics to a field-name mismatch.
+      const lyrics =
+        clip?.lyric ?? clip?.lyrics ?? clip?.text ?? clip?.prompt ?? undefined;
+
       return {
         taskId,
         status,
@@ -151,7 +158,7 @@ export function createSunoAdapter(opts: {
         durationMs:
           typeof clip?.duration === 'number' ? Math.round(clip.duration * 1000) : undefined,
         title: clip?.title,
-        lyrics: clip?.prompt,
+        lyrics,
         model: 'suno-v4.5',
         prompt: r?.param ?? '',
       };
@@ -168,6 +175,10 @@ interface SunoRecord {
     duration?: number;
     title?: string;
     prompt?: string;
+    /** Alternate lyric field names seen across Suno-compatible providers. */
+    lyric?: string;
+    lyrics?: string;
+    text?: string;
   }>;
 }
 

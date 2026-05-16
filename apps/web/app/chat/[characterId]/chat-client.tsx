@@ -821,7 +821,6 @@ function WeatherSongCard({
   weatherLabel: string;
   onCancel: () => void;
 }) {
-  const [lyricsOpen, setLyricsOpen] = useState(false);
   // Tick once a second so elapsed time + progress bar refresh while the
   // task is in flight. Stops ticking once the track is terminal.
   const [, setTick] = useState(0);
@@ -856,11 +855,20 @@ function WeatherSongCard({
   else if (track.status === 'done') statusCopy = '완성!';
   else if (track.status === 'failed') statusCopy = '실패';
 
+  // Build a clean filename for the download proxy. ASCII-only so the
+  // server-side sanitizer doesn't have to strip it again.
+  const downloadName =
+    `${title}`.replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) ||
+    `weather-song`;
+  const downloadHref = track.audioUrl
+    ? `/api/music/download?url=${encodeURIComponent(track.audioUrl)}&name=${encodeURIComponent(downloadName)}.mp3`
+    : '';
+
   return (
-    <div className="w-full max-w-[320px] overflow-hidden rounded-2xl bg-white shadow-md">
+    <div className="w-full max-w-[340px] overflow-hidden rounded-2xl bg-white shadow-md">
       {/* Album-cover style header */}
       <div
-        className="relative h-32 w-full"
+        className="relative h-36 w-full"
         style={{ background: `linear-gradient(135deg, ${accent} 0%, #241b3e 100%)` }}
       >
         {isActive ? (
@@ -874,17 +882,24 @@ function WeatherSongCard({
             }}
           />
         ) : null}
-        <div className="absolute inset-x-4 bottom-3 flex items-end justify-between text-white">
-          <span aria-hidden className="font-display text-3xl leading-none">
-            ♪
-          </span>
+        <div className="absolute inset-x-4 top-3 flex items-start justify-between text-white">
           <span className="font-mono text-[9px] uppercase tracking-eyebrow opacity-90">
             Weather Song
+          </span>
+          {track.status === 'done' ? (
+            <span className="rounded-full bg-white/25 px-2 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow backdrop-blur-sm">
+              ✓ 완성
+            </span>
+          ) : null}
+        </div>
+        <div className="absolute inset-x-4 bottom-3 flex items-end justify-between text-white">
+          <span aria-hidden className="font-display text-4xl leading-none">
+            ♪
           </span>
         </div>
       </div>
 
-      <div className="space-y-2 px-4 py-3">
+      <div className="space-y-2.5 px-4 py-3">
         <div className="font-display text-lg leading-tight tracking-tight text-brand-ink">
           {title}
         </div>
@@ -893,24 +908,39 @@ function WeatherSongCard({
         </div>
 
         {track.status === 'done' && track.audioUrl ? (
-          <div className="space-y-2 pt-1">
+          <div className="space-y-3 pt-1">
+            {/* Native audio player — controls let the user scrub, pause,
+                volume. preload='metadata' so duration shows immediately. */}
             {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-            <audio controls preload="none" src={track.audioUrl} className="w-full" />
+            <audio
+              controls
+              preload="metadata"
+              src={track.audioUrl}
+              className="w-full"
+              style={{ height: 40 }}
+            />
+
+            {/* Download button — goes through our proxy so the file
+                lands with a clean filename instead of the Suno S3 hash. */}
+            <a
+              href={downloadHref}
+              download={`${downloadName}.mp3`}
+              className="flex items-center justify-center gap-1.5 rounded-full py-2 font-sans text-[13px] font-medium text-white transition hover:opacity-90"
+              style={{ background: accent }}
+            >
+              <span aria-hidden>↓</span>
+              <span>MP3 다운로드</span>
+            </a>
+
             {track.lyrics ? (
-              <>
-                <button
-                  type="button"
-                  className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
-                  onClick={() => setLyricsOpen((v) => !v)}
-                >
-                  {lyricsOpen ? '가사 접기' : '가사 보기'}
-                </button>
-                {lyricsOpen ? (
-                  <pre className="mt-1 whitespace-pre-wrap rounded-xl bg-brand-paper px-3 py-2 font-sans text-[12px] leading-relaxed text-brand-ink-soft">
-                    {track.lyrics}
-                  </pre>
-                ) : null}
-              </>
+              <div>
+                <div className="mb-1.5 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
+                  가사
+                </div>
+                <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-xl bg-brand-paper px-3 py-2.5 font-sans text-[13px] leading-relaxed text-brand-ink">
+                  {track.lyrics}
+                </pre>
+              </div>
             ) : null}
           </div>
         ) : track.status === 'failed' ? (
