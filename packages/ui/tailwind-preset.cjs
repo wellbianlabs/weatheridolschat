@@ -94,10 +94,29 @@ module.exports = {
           '0%,100%': { backgroundPosition: '0% 50%' },
           '50%': { backgroundPosition: '100% 50%' },
         },
+        // Typing indicator — three dots that gently rise & fade in sequence.
+        // Each dot uses the same keyframes with a stagger delay applied inline.
+        'typing-bounce': {
+          '0%, 80%, 100%': { transform: 'translateY(0)', opacity: '0.3' },
+          '40%': { transform: 'translateY(-4px)', opacity: '1' },
+        },
+        // Blinking cursor at the tail of a streaming message.
+        'cursor-blink': {
+          '0%, 50%': { opacity: '1' },
+          '51%, 100%': { opacity: '0' },
+        },
+        // Loader sweep for image generation — diagonal gloss across placeholder.
+        'sheen-sweep': {
+          '0%': { backgroundPosition: '-200% 0' },
+          '100%': { backgroundPosition: '200% 0' },
+        },
       },
       animation: {
         'fade-up': 'fade-up 320ms cubic-bezier(0.22,0.61,0.36,1) both',
         shimmer: 'shimmer 8s ease-in-out infinite',
+        'typing-bounce': 'typing-bounce 1.2s ease-in-out infinite',
+        'cursor-blink': 'cursor-blink 0.9s steps(1) infinite',
+        'sheen-sweep': 'sheen-sweep 1.6s ease-in-out infinite',
       },
     },
   },

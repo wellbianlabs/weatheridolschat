@@ -322,11 +322,7 @@ export default function ChatClient({ character }: { character: Character }) {
               {m.kind === 'image' ? (
                 <div className="overflow-hidden rounded-2xl bg-white shadow-sm">
                   {m.pending ? (
-                    <div className="flex h-64 w-64 items-center justify-center bg-brand-paper">
-                      <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
-                        loading photo
-                      </span>
-                    </div>
+                    <ImageGeneratingState accent={character.accentColor} />
                   ) : (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
@@ -391,10 +387,22 @@ export default function ChatClient({ character }: { character: Character }) {
             <button
               type="submit"
               disabled={sending || !input.trim()}
-              className="h-11 rounded-full px-5 font-sans text-[14px] font-medium text-white transition disabled:opacity-40"
+              className="flex h-11 min-w-[72px] items-center justify-center rounded-full px-5 font-sans text-[14px] font-medium text-white transition disabled:opacity-60"
               style={{ background: character.accentColor }}
             >
-              보내기
+              {sending ? (
+                <span className="inline-flex items-center gap-1" aria-label="전송 중">
+                  {[0, 160, 320].map((delay) => (
+                    <span
+                      key={delay}
+                      className="inline-block h-1.5 w-1.5 animate-typing-bounce rounded-full bg-white"
+                      style={{ animationDelay: `${delay}ms` }}
+                    />
+                  ))}
+                </span>
+              ) : (
+                '보내기'
+              )}
             </button>
           </form>
         </div>
@@ -459,15 +467,25 @@ function ChatBubble({
       </div>
     );
   }
+  const streaming = message.pending && !!message.content;
   return (
     <div
       className="max-w-[80%] cursor-pointer rounded-2xl bg-white px-4 py-2.5 font-sans text-[15px] leading-relaxed text-brand-ink shadow-xs"
       onClick={() => message.content && setOpen((v) => !v)}
     >
       {message.pending && !message.content ? (
-        <span className="opacity-40">···</span>
+        <TypingDots accent={accentColor} />
       ) : (
-        message.content || ' '
+        <>
+          {message.content || ' '}
+          {streaming ? (
+            <span
+              aria-hidden
+              className="ml-0.5 inline-block h-[1em] w-[2px] translate-y-[3px] animate-cursor-blink rounded-sm"
+              style={{ background: accentColor }}
+            />
+          ) : null}
+        </>
       )}
       {open && message.content ? (
         <div className="mt-2 flex gap-4 border-t border-brand-ink/10 pt-2">
@@ -495,6 +513,65 @@ function ChatBubble({
           </button>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Three-dot typing indicator. Each dot bounces on the same keyframes but is
+ * offset by a 160ms stagger so the wave reads as a single travelling pulse.
+ * Tinted to the character's accent color so it feels like *that* character
+ * is thinking, not a generic system spinner.
+ */
+function TypingDots({ accent }: { accent: string }) {
+  return (
+    <span className="inline-flex items-center gap-1 py-[3px]" aria-label="응답 생성 중">
+      {[0, 160, 320].map((delay) => (
+        <span
+          key={delay}
+          className="inline-block h-1.5 w-1.5 animate-typing-bounce rounded-full"
+          style={{ background: accent, animationDelay: `${delay}ms` }}
+        />
+      ))}
+      <span className="ml-1.5 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
+        생성 중
+      </span>
+    </span>
+  );
+}
+
+/**
+ * Loader for assistant-generated images. Diagonal gradient sweep across the
+ * placeholder plus a tinted caption — communicates "this is being drawn"
+ * rather than "this failed to load."
+ */
+function ImageGeneratingState({ accent }: { accent: string }) {
+  return (
+    <div className="relative flex h-64 w-64 items-center justify-center overflow-hidden bg-brand-paper">
+      {/* Diagonal sheen sweep */}
+      <div
+        aria-hidden
+        className="absolute inset-0 animate-sheen-sweep"
+        style={{
+          background:
+            'linear-gradient(105deg, transparent 30%, rgba(255,255,255,0.65) 50%, transparent 70%)',
+          backgroundSize: '200% 100%',
+        }}
+      />
+      <div className="relative z-10 flex flex-col items-center gap-2.5">
+        <span className="inline-flex items-center gap-1">
+          {[0, 160, 320].map((delay) => (
+            <span
+              key={delay}
+              className="inline-block h-2 w-2 animate-typing-bounce rounded-full"
+              style={{ background: accent, animationDelay: `${delay}ms` }}
+            />
+          ))}
+        </span>
+        <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
+          사진 그리는 중
+        </span>
+      </div>
     </div>
   );
 }
