@@ -90,8 +90,7 @@ export async function POST(req: Request): Promise<Response> {
   });
 
   // Image: validated + decoded once here so the safeguard / weather
-  // calls above don't need to know about it. Both Claude and Gemini
-  // support vision via the same `userImage` field.
+  // calls above don't need to know about it.
   const userImage = parseImageDataUrl(body.imageDataUrl) ?? undefined;
   if (body.imageDataUrl && !userImage) {
     return jsonError(
@@ -101,18 +100,53 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // When an image is attached we strongly prefer Claude — its vision
-  // grounding is more reliable than Gemini's for our use cases, and
-  // it produces longer, more descriptive responses. Override the tier
-  // routing for this single turn so a free-tier user still gets a
-  // proper vision reply when they send a photo.
-  const visionTier = userImage && anthropicApiKey ? 'premium' : tier;
+  // ── Vision routing: Claude-only by design ───────────────────────
+  //
+  // Camera input is conceptually "look at this picture and let's talk
+  // about it" — a multimodal CONVERSATIONAL flow, not image
+  // generation. We pin that flow to Claude on purpose:
+  //
+  //   - Gemini vision works but produces noticeably shorter and
+  //     less character-voiced replies in Korean; silently falling
+  //     back would give users an inconsistent experience and they
+  //     wouldn't know which model answered.
+  //   - OpenAI is NOT in the vision path at all — we only call
+  //     OpenAI for image GENERATION (the selfie feature). Camera
+  //     input and selfie output are two completely separate
+  //     pipelines, even though both involve "an image".
+  //
+  // So when a photo is attached:
+  //   • mockMode → mock adapter (development only; image dropped)
+  //   • else, ANTHROPIC_API_KEY required → Claude
+  //   • else → hard fail with an actionable error (better than a
+  //            silent Gemini fallback that would surprise the user
+  //            with a different writing style).
+  if (userImage && !mockMode && !anthropicApiKey) {
+    return jsonError(
+      'no_vision_provider',
+      'ANTHROPIC_API_KEY가 설정되지 않아 사진 분석을 할 수 없어요. Vercel 환경변수에 Claude API 키를 추가해주세요.',
+      503,
+    );
+  }
+
+  // Force-route vision turns through Claude (premium tier path).
+  // Non-vision turns keep the user's tier preference.
+  const visionTier = userImage ? 'premium' : tier;
   const adapter = pickChatAdapter({
     tier: visionTier,
     mockMode,
+    // When a photo is attached, deliberately NOT pass the Gemini key
+    // so pickChatAdapter can't silently fall through to it. The
+    // ANTHROPIC_API_KEY presence check above already guarantees this
+    // path only runs when Claude is reachable.
     anthropicApiKey,
-    geminiApiKey,
+    geminiApiKey: userImage ? undefined : geminiApiKey,
   });
+  if (userImage) {
+    console.info(
+      `[chat] vision adapter=${adapter.id} character=${character.id} bytes=${Math.round(userImage.base64.length * 0.75)}`,
+    );
+  }
 
   const userMessageId = cryptoRandom();
   const assistantMessageId = cryptoRandom();

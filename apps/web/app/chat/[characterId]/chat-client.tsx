@@ -653,6 +653,22 @@ export default function ChatClient({ character }: { character: Character }) {
           imageDataUrl: attachedImage ?? undefined,
         }),
       });
+      // Non-2xx responses (e.g. 503 no_vision_provider, 400 validation)
+      // come back as JSON, not SSE. Surface the server's message into
+      // the assistant bubble directly so the user sees what to fix
+      // (which env var to set, etc.) instead of "응답이 비어있어요".
+      if (!res.ok) {
+        const errBody = (await res.json().catch(() => ({}))) as {
+          error?: { code?: string; message?: string };
+        };
+        const reason = errBody.error?.message ?? `HTTP ${res.status}`;
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId ? { ...m, content: reason, pending: false } : m,
+          ),
+        );
+        return;
+      }
       if (!res.body) throw new Error('no_body');
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
