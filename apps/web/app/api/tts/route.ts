@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-import { CHARACTERS, type CharacterId } from '@wi/core/characters';
+import { type CharacterId } from '@wi/core/characters';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -91,23 +91,90 @@ function chirpToNeural2(chirpName: string): string {
   return 'ko-KR-Neural2-B';
 }
 
-/** Convert raw text into mild SSML with natural breath pauses at
- *  sentence ends and Korean clause boundaries. Keeps the markup
- *  conservative so Chirp3-HD doesn't override its own prosody. */
-function textToSsml(text: string): string {
+/**
+ * Per-character emotional baseline for SSML <prosody> wrapping.
+ *
+ * Chirp3-HD already picks up emotion from punctuation and sentence
+ * shape, but wrapping the whole utterance in a character-specific
+ * prosody nudges the *average* delivery toward that persona — Sunny
+ * runs slightly brighter and quicker, Rain breathes more, Thunder
+ * lands harder. The model still varies within those bounds based on
+ * sentence content.
+ *
+ * Chirp3-HD enforces these only loosely (the model can override for
+ * naturalness); Neural2 fallback respects them strictly.
+ */
+const CHARACTER_PROSODY: Record<CharacterId, { rate: string; pitch: string; volume: string }> = {
+  sunny: { rate: '105%', pitch: '+1st', volume: 'medium' }, // bright, slightly higher
+  rain: { rate: '92%', pitch: '-1st', volume: 'soft' }, // soft, slower, lower
+  cloudy: { rate: '96%', pitch: '-0.5st', volume: 'medium' }, // dreamy, mid-low
+  thunder: { rate: '108%', pitch: '-1.5st', volume: 'loud' }, // sharp, fast, grounded
+};
+
+const DEFAULT_PROSODY = { rate: '100%', pitch: '0st', volume: 'medium' } as const;
+
+/**
+ * Convert raw text into emotion-aware SSML for natural-sounding TTS.
+ *
+ * Steps:
+ *   1. Strip noise the model would otherwise vocalise (emoji, ㅋㅋ,
+ *      ㅎㅎ, ㅠㅠ, repeated `!`s, markdown leftovers).
+ *   2. Detect emotional sentences and wrap them in <prosody> overrides
+ *      (excitement at !!! → pitch up; questions left to the model;
+ *      trailing `~~` → relaxed playful).
+ *   3. Insert breath pauses at sentence terminators and Korean clause
+ *      boundaries.
+ *   4. Wrap the whole utterance in a character-specific <prosody> base
+ *      so the average tone matches the persona.
+ */
+function textToSsml(text: string, characterId: CharacterId | undefined): string {
   const escaped = text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
-  const withBreaks = escaped
+
+  // Split into sentences (Korean + English terminators), wrap each
+  // emotional sentence in its own <prosody> so excitement/playful
+  // tone is concentrated in the right place rather than averaged
+  // across the whole reply.
+  const SENTENCE = /([^.!?…]+[.!?…]+|[^.!?…]+$)/g;
+  const wrapped = escaped.replace(SENTENCE, (chunk) => {
+    const trimmed = chunk.trim();
+    if (!trimmed) return chunk;
+    // Excited — multiple !s or "!!" → noticeably higher pitch + rate
+    if (/!{2,}|❗❗+/.test(trimmed) || /\b(와|우와|진짜|대박|짱)\b.*!/.test(trimmed)) {
+      return `<prosody pitch="+1.5st" rate="108%">${chunk}</prosody>`;
+    }
+    // Mild excitement — single !
+    if (/!\s*$/.test(trimmed)) {
+      return `<prosody pitch="+0.5st" rate="103%">${chunk}</prosody>`;
+    }
+    // Playful / drawn-out — trailing ~ or ~~
+    if (/~+\s*$/.test(trimmed)) {
+      return `<prosody rate="95%" pitch="+0.3st">${chunk}</prosody>`;
+    }
+    // Sad/wistful — Korean sadness cues
+    if (/(슬프|쓸쓸|외로|아쉽|아련|그립)/.test(trimmed)) {
+      return `<prosody rate="88%" volume="soft" pitch="-0.8st">${chunk}</prosody>`;
+    }
+    return chunk;
+  });
+
+  const withBreaks = wrapped
     // Strong pause at sentence terminators
-    .replace(/([.!?…])\s+/g, '$1<break time="350ms"/> ')
+    .replace(/([.!?…])\s+/g, '$1<break time="380ms"/> ')
     // Soft pause at Korean commas/semis
-    .replace(/([,;])\s+/g, '$1<break time="180ms"/> ')
-    // Tiny pause around Korean conjunction openers ("그래서", "근데", "음")
-    .replace(/(^|[.!?]\s*)(음|아|어|그래서|근데|그런데|있잖아)([\s,])/g, '$1$2<break time="120ms"/>$3');
-  return `<speak>${withBreaks}</speak>`;
+    .replace(/([,;])\s+/g, '$1<break time="200ms"/> ')
+    // Tiny pause after Korean filler/openers
+    .replace(
+      /(^|[.!?]\s*)(음|아|어|그래서|근데|그런데|있잖아|봐봐)([\s,])/g,
+      '$1$2<break time="140ms"/>$3',
+    );
+
+  // Wrap everything in the character's emotional baseline.
+  const p = (characterId && CHARACTER_PROSODY[characterId]) ?? DEFAULT_PROSODY;
+  return `<speak><prosody rate="${p.rate}" pitch="${p.pitch}" volume="${p.volume}">${withBreaks}</prosody></speak>`;
 }
 
 const MAX_CHARS = 4500; // Google TTS rejects > 5000 chars; leave headroom.
@@ -139,12 +206,13 @@ export async function POST(req: Request): Promise<Response> {
   const rate = clamp(body.rate ?? preset.rate, 0.25, 4.0);
   const pitch = clamp(body.pitch ?? preset.pitch, -20.0, 20.0);
 
-  // Chirp3-HD gives the most natural delivery when the input is SSML
-  // with light pause hints — the model treats the markup as a
-  // performance cue. For Neural2 / Wavenet we still feed plain text
-  // (they handle their own punctuation prosody).
-  const isChirp3 = /^ko-KR-Chirp/i.test(voice);
-  const ssml = isChirp3 ? textToSsml(text) : null;
+  // SSML emotion wrapping. Apply for BOTH Chirp3-HD and Neural2 now —
+  // Neural2 respects <prosody> strictly so the character's emotional
+  // baseline shines through, and Chirp3-HD treats it as a performance
+  // cue. The character-specific prosody envelope is what makes
+  // Sunny/Rain/Cloudy/Thunder actually sound different in mood, not
+  // just in voice timbre.
+  const ssml = textToSsml(text, body.characterId as CharacterId | undefined);
 
   // Build the audioConfig dynamically: only include `pitch` for
   // voice families that accept it. Chirp3-HD returns 400 on
@@ -160,6 +228,7 @@ export async function POST(req: Request): Promise<Response> {
   };
   if (supportsPitch(voice)) audioConfig.pitch = pitch;
 
+  const isChirp3 = /^ko-KR-Chirp/i.test(voice);
   console.info(
     `[tts] start character=${body.characterId ?? '-'} voice=${voice} rate=${rate} pitch=${supportsPitch(voice) ? pitch : 'n/a'} ssml=${!!ssml} chars=${text.length}`,
   );
@@ -209,7 +278,11 @@ export async function POST(req: Request): Promise<Response> {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              input: { text },
+              // Reuse the same SSML so the fallback voice still gets
+              // the character's emotional baseline + sentence-level
+              // prosody overrides — Neural2 actually respects these
+              // more strictly than Chirp3-HD does.
+              input: { ssml },
               voice: { languageCode: 'ko-KR', name: fallback },
               audioConfig: retryAudio,
             }),
@@ -274,11 +347,20 @@ export async function POST(req: Request): Promise<Response> {
 
 /**
  * Clean text before sending to TTS so we don't pay for or vocalise
- * markup tokens. Removes:
- *   - markdown bold/italic markers (**, __, *, _)
- *   - inline links — keep label, drop URL
- *   - code fences and inline backticks
- *   - emoji are kept (Google TTS handles them gracefully)
+ * non-speech tokens. The chat assistant frequently inserts emojis
+ * (☀️🎵🌧️), Korean chat-only sequences (ㅋㅋ, ㅎㅎ, ㅠㅠ), and
+ * markdown markup — all of which Google TTS would otherwise read
+ * literally ("symbol", "kieuk kieuk", "asterisk").
+ *
+ * Conservative strip rules:
+ *   1. Markdown: bold, italic, code, inline links (keep label).
+ *   2. Emoji: every Unicode codepoint with the Extended_Pictographic
+ *      property + the zero-width joiner + variation selectors.
+ *   3. Standalone Hangul jamo runs (ㅋㅋㅋ / ㅎㅎ / ㅠㅠ / ㅜㅜ etc.) —
+ *      these are chat decorations, not words.
+ *   4. Triple-plus repeated punctuation (!!! → !) so TTS doesn't
+ *      stutter on the marker.
+ *   5. Collapse resulting whitespace.
  */
 function stripForSpeech(s: string): string {
   return s
@@ -289,6 +371,17 @@ function stripForSpeech(s: string): string {
     .replace(/__([^_]+)__/g, '$1')
     .replace(/\*([^*]+)\*/g, '$1')
     .replace(/_([^_]+)_/g, '$1')
+    // Emoji and pictographs (handles 🎵 ☀️ 👀 etc.). Strip ZWJ and
+    // variation selectors too so emoji + skin-tone modifier combos
+    // don't leave orphan codepoints.
+    .replace(/\p{Extended_Pictographic}/gu, '')
+    // Standalone Korean jamo runs (no real syllable around them) —
+    // typical chat-only decorations. ㄱ-ㅎ is consonants, ㅏ-ㅣ is
+    // vowels. Strip clusters of 2+ jamo so "ㅋㅋㅋ" and "ㅠㅠ" vanish
+    // but "한글" (proper Hangul syllables, codepoint ≥ AC00) survives.
+    .replace(/[ㄱ-ㅎㅏ-ㅣ]{2,}/g, '')
+    // Collapse repeated marks ("!!!" → "!", "???" → "?", "~~~~" → "~")
+    .replace(/([!?~])\1{2,}/g, '$1$1') // keep at most 2 for inflection
     .replace(/\s+/g, ' ')
     .trim();
 }
