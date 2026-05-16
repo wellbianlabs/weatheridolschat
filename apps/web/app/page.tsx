@@ -10,7 +10,7 @@ export default function LandingPage() {
       <section
         className="relative w-full overflow-hidden"
         style={{
-          backgroundImage: "url('/hero.png')",
+          backgroundImage: "url('/hero.webp')",
           backgroundSize: 'cover',
           backgroundPosition: 'center right',
           backgroundRepeat: 'no-repeat',

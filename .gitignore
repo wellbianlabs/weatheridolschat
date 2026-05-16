@@ -10,6 +10,11 @@ build
 .turbo
 *.tsbuildinfo
 
+# Originals of compressed assets — kept locally as a safety net but
+# not shipped (the lossy webp/jpg versions in public/ are what the
+# site serves). Recompress via `node scripts/compress-images.mjs`.
+apps/web/public-orig/
+
 # env
 .env
 .env.local

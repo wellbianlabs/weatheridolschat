@@ -61,15 +61,21 @@ export function createOpenAIImageAdapter(apiKey: string): ImageAdapter {
           const reason = (err as Error).message;
           console.error(`[oai-image] ref load FAIL ${reason}`);
           throw new Error(
-            `레퍼런스 이미지를 불러오지 못했어요. (${reason}) public/reference/${input.characterId}.png 파일과 빌드 출력 확인 필요.`,
+            `레퍼런스 이미지를 불러오지 못했어요. (${reason}) public/reference/${input.characterId}.jpg 파일과 빌드 출력 확인 필요.`,
           );
         }
         console.info(
           `[oai-image] ref loaded src=${input.referenceImageUrl} bytes=${referenceBuffer.length}`,
         );
 
-        const referenceFile = await toFile(referenceBuffer, 'reference.png', {
-          type: 'image/png',
+        // Sniff the actual format from the buffer header instead of
+        // hard-coding PNG — after compression we ship JPEGs for
+        // reference images, but the OpenAI SDK validates the
+        // filename/MIME against the bytes. Magic-byte detection
+        // covers both formats and any future change.
+        const detected = detectImageType(referenceBuffer);
+        const referenceFile = await toFile(referenceBuffer, `reference.${detected.ext}`, {
+          type: detected.mime,
         });
 
         try {
@@ -161,6 +167,33 @@ export function createOpenAIImageAdapter(apiKey: string): ImageAdapter {
  * Each failure is logged so Vercel runtime logs distinguish which layer
  * fell through and why.
  */
+/** Tiny magic-byte detector for the formats OpenAI image-edit
+ *  accepts. Sniffs from the first 12 bytes. */
+function detectImageType(buf: Buffer): { ext: 'png' | 'jpg' | 'webp' | 'gif'; mime: string } {
+  if (buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    return { ext: 'png', mime: 'image/png' };
+  }
+  if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    return { ext: 'jpg', mime: 'image/jpeg' };
+  }
+  if (
+    buf.length >= 12 &&
+    buf.toString('ascii', 0, 4) === 'RIFF' &&
+    buf.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return { ext: 'webp', mime: 'image/webp' };
+  }
+  if (
+    buf.length >= 6 &&
+    buf.toString('ascii', 0, 3) === 'GIF' &&
+    (buf[3] === 0x38 && (buf[4] === 0x37 || buf[4] === 0x39))
+  ) {
+    return { ext: 'gif', mime: 'image/gif' };
+  }
+  // Default to PNG — OpenAI's image-edit endpoint historically defaults to PNG.
+  return { ext: 'png', mime: 'image/png' };
+}
+
 async function fetchImageBuffer(url: string, requestOrigin?: string): Promise<Buffer> {
   // Strategy 1: explicit absolute URL.
   if (url.startsWith('http')) {

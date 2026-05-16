@@ -22,7 +22,10 @@ const nextConfig = {
     // generator can read them off disk without going through HTTP (and
     // without depending on NEXT_PUBLIC_APP_URL being correctly set).
     outputFileTracingIncludes: {
-      '/api/image': ['./public/reference/*.png'],
+      // After image compression, references shipped as .jpg (PNG was
+      // too heavy for the lambda bundle). Glob both so we don't break
+      // if someone re-introduces a PNG reference later.
+      '/api/image': ['./public/reference/*.jpg', './public/reference/*.png'],
     },
   },
   images: {

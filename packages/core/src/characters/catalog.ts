@@ -11,8 +11,8 @@ export const CHARACTERS: Record<string, Character> = {
     shortBio: '절망마저 태워버리는 강렬한 주파수',
     recommendationDomains: ['outdoor', 'fitness', 'beauty', 'food'],
     sortOrder: 1,
-    rosterImageUrl: '/roster/sunny.png',
-    referenceImageUrl: '/reference/sunny.png',
+    rosterImageUrl: '/roster/sunny.webp',
+    referenceImageUrl: '/reference/sunny.jpg',
   },
   rain: {
     id: 'rain',
@@ -24,8 +24,8 @@ export const CHARACTERS: Record<string, Character> = {
     shortBio: '세상의 소음을 씻어내리는 촉촉한 목소리',
     recommendationDomains: ['cafe', 'healing', 'music', 'book'],
     sortOrder: 2,
-    rosterImageUrl: '/roster/rain.png',
-    referenceImageUrl: '/reference/rain.png',
+    rosterImageUrl: '/roster/rain.webp',
+    referenceImageUrl: '/reference/rain.jpg',
   },
   cloudy: {
     id: 'cloudy',
@@ -37,8 +37,8 @@ export const CHARACTERS: Record<string, Character> = {
     shortBio: '정형화되지 않은 자유롭고 몽환적인 상상력',
     recommendationDomains: ['art', 'photo_spot', 'stationery', 'cafe'],
     sortOrder: 3,
-    rosterImageUrl: '/roster/cloudy.png',
-    referenceImageUrl: '/reference/cloudy.png',
+    rosterImageUrl: '/roster/cloudy.webp',
+    referenceImageUrl: '/reference/cloudy.jpg',
   },
   thunder: {
     id: 'thunder',
@@ -50,8 +50,8 @@ export const CHARACTERS: Record<string, Character> = {
     shortBio: '비바람 속에서도 굴하지 않는 폭발적 퍼포먼스',
     recommendationDomains: ['delivery', 'game', 'streetwear', 'workout'],
     sortOrder: 4,
-    rosterImageUrl: '/roster/thunder.png',
-    referenceImageUrl: '/reference/thunder.png',
+    rosterImageUrl: '/roster/thunder.webp',
+    referenceImageUrl: '/reference/thunder.jpg',
   },
 };
 
