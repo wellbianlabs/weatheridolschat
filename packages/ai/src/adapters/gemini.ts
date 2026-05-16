@@ -53,7 +53,12 @@ export function createGeminiAdapter(apiKey: string): ChatAdapter {
   function buildModel(modelId: string): GenerativeModel {
     return genai.getGenerativeModel({
       model: modelId,
-      generationConfig: { maxOutputTokens: 1024, temperature: 0.85 },
+      generationConfig: {
+        maxOutputTokens: 2048,
+        temperature: 0.9,
+        topP: 0.95,
+        topK: 40,
+      },
       safetySettings: SAFETY_SETTINGS,
     });
   }

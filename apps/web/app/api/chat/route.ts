@@ -78,8 +78,16 @@ export async function POST(req: Request): Promise<Response> {
           send(evt);
         }
 
+        // Post-stream side-effects based on the user's intent. Works
+        // regardless of which chat adapter (Mock / Gemini / Claude) ran —
+        // we always classify the message server-side so live models also
+        // get the right follow-up: selfie image, song, or product card.
         const intent = classifyIntent(text);
-        if (intent === 'recommend') {
+        if (intent === 'image_request') {
+          send({ type: 'tool', name: 'request_image', output: { intent: 'selfie' } });
+        } else if (intent === 'song_request') {
+          send({ type: 'tool', name: 'request_song', output: {} });
+        } else if (intent === 'recommend') {
           const product = pickProductForCharacter(character.id);
           if (product) {
             send({ type: 'attachment', payload: { kind: 'product', ...product } });
