@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type { Character } from '@wi/core/characters';
 import type { ProductPayload } from '@wi/core/chat';
@@ -909,39 +909,13 @@ function WeatherSongCard({
 
         {track.status === 'done' && track.audioUrl ? (
           <div className="space-y-3 pt-1">
-            {/* Native audio player — controls let the user scrub, pause,
-                volume. preload='metadata' so duration shows immediately. */}
-            {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
-            <audio
-              controls
-              preload="metadata"
+            <AudioPlayer
               src={track.audioUrl}
-              className="w-full"
-              style={{ height: 40 }}
+              accent={accent}
+              downloadHref={downloadHref}
+              downloadName={`${downloadName}.mp3`}
             />
-
-            {/* Download button — goes through our proxy so the file
-                lands with a clean filename instead of the Suno S3 hash. */}
-            <a
-              href={downloadHref}
-              download={`${downloadName}.mp3`}
-              className="flex items-center justify-center gap-1.5 rounded-full py-2 font-sans text-[13px] font-medium text-white transition hover:opacity-90"
-              style={{ background: accent }}
-            >
-              <span aria-hidden>↓</span>
-              <span>MP3 다운로드</span>
-            </a>
-
-            {track.lyrics ? (
-              <div>
-                <div className="mb-1.5 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
-                  가사
-                </div>
-                <pre className="max-h-64 overflow-y-auto whitespace-pre-wrap rounded-xl bg-brand-paper px-3 py-2.5 font-sans text-[13px] leading-relaxed text-brand-ink">
-                  {track.lyrics}
-                </pre>
-              </div>
-            ) : null}
+            {track.lyrics ? <LyricsView lyrics={track.lyrics} accent={accent} /> : null}
           </div>
         ) : track.status === 'failed' ? (
           <p className="font-sans text-[13px] leading-relaxed text-brand-ink-soft">
@@ -1006,6 +980,256 @@ function SongProgress({
       </div>
     </div>
   );
+}
+
+/**
+ * Custom audio player styled to live inside a chat card.
+ *
+ * Why not use the browser's native `<audio controls>`? Two reasons:
+ *   1. The default controls vary widely by OS/browser (Chrome bar vs
+ *      Safari rounded vs Firefox slim) and never match our pastel
+ *      character-tinted aesthetic.
+ *   2. The native bar is a single 40px row that competes with the
+ *      download button for visual weight — users had a hard time
+ *      finding the play button. The custom version gives the play
+ *      button a 48px circular target that's unmistakable.
+ *
+ * Still uses a hidden `<audio>` element under the hood for all the
+ * actual decoding / buffering / streaming — we just drive it from
+ * React state and render our own buttons + scrubber.
+ */
+function AudioPlayer({
+  src,
+  accent,
+  downloadHref,
+  downloadName,
+}: {
+  src: string;
+  accent: string;
+  downloadHref: string;
+  downloadName: string;
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+    const onTime = () => setCurrent(el.currentTime);
+    const onDur = () => setDuration(Number.isFinite(el.duration) ? el.duration : 0);
+    const onPlay = () => setPlaying(true);
+    const onPause = () => setPlaying(false);
+    const onEnded = () => {
+      setPlaying(false);
+      setCurrent(0);
+    };
+    const onLoaded = () => setLoaded(true);
+    el.addEventListener('timeupdate', onTime);
+    el.addEventListener('durationchange', onDur);
+    el.addEventListener('loadedmetadata', onLoaded);
+    el.addEventListener('play', onPlay);
+    el.addEventListener('pause', onPause);
+    el.addEventListener('ended', onEnded);
+    return () => {
+      el.removeEventListener('timeupdate', onTime);
+      el.removeEventListener('durationchange', onDur);
+      el.removeEventListener('loadedmetadata', onLoaded);
+      el.removeEventListener('play', onPlay);
+      el.removeEventListener('pause', onPause);
+      el.removeEventListener('ended', onEnded);
+    };
+  }, []);
+
+  const toggle = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (el.paused) void el.play();
+    else el.pause();
+  };
+
+  const seek = (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = audioRef.current;
+    if (!el || !duration) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    el.currentTime = ratio * duration;
+    setCurrent(el.currentTime);
+  };
+
+  const pct = duration ? (current / duration) * 100 : 0;
+
+  return (
+    <div className="rounded-2xl bg-brand-paper p-3">
+      {/* Hidden underlying element — drives playback; not visible. */}
+      {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+      <audio ref={audioRef} src={src} preload="metadata" className="hidden" />
+
+      <div className="flex items-center gap-3">
+        {/* Big circular play/pause */}
+        <button
+          type="button"
+          onClick={toggle}
+          aria-label={playing ? '일시정지' : '재생'}
+          className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-white shadow-sm transition hover:scale-105 active:scale-95"
+          style={{ background: accent }}
+        >
+          {playing ? (
+            // Pause icon — two vertical bars
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+              <rect x="3.5" y="2.5" width="3" height="11" rx="0.5" fill="currentColor" />
+              <rect x="9.5" y="2.5" width="3" height="11" rx="0.5" fill="currentColor" />
+            </svg>
+          ) : (
+            // Play icon — right-pointing triangle
+            <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+              <path d="M4 2.5 L13 8 L4 13.5 Z" fill="currentColor" />
+            </svg>
+          )}
+        </button>
+
+        {/* Scrubber column */}
+        <div className="flex flex-1 flex-col gap-1.5">
+          <div
+            role="slider"
+            tabIndex={0}
+            aria-label="재생 위치"
+            aria-valuemin={0}
+            aria-valuemax={duration || 0}
+            aria-valuenow={current}
+            onClick={seek}
+            className="group h-1.5 cursor-pointer rounded-full bg-brand-ink/10"
+          >
+            <div
+              className="h-full rounded-full transition-[width] duration-100"
+              style={{ width: `${pct}%`, background: accent }}
+            />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="font-mono text-[10px] tabular-nums text-brand-ink-soft">
+              {fmtTime(current)} / {loaded ? fmtTime(duration) : '--:--'}
+            </span>
+            <a
+              href={downloadHref}
+              download={downloadName}
+              aria-label="MP3 다운로드"
+              className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft transition hover:text-brand-ink"
+            >
+              <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden>
+                <path
+                  d="M8 1 V11 M4 7 L8 11 L12 7 M2 14 H14"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              MP3 다운로드
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function fmtTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const total = Math.floor(seconds);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Render Suno-generated lyrics with section structure preserved.
+ *
+ * Suno emits lyrics with bracketed section markers ([Verse 1], [Chorus],
+ * [Bridge], [Outro], etc.) plus blank lines between sections. The raw
+ * text rendered as a `<pre>` (our old approach) reads as a wall of
+ * Korean/English mixed and the user can't tell where the chorus starts.
+ *
+ * We parse on the fly:
+ *   - Lines matching `/^\s*\[(.+?)\]\s*$/` become section labels (eyebrow style,
+ *     accent-tinted, with a thin divider).
+ *   - Non-empty content lines render as plain body text.
+ *   - Empty lines add vertical breathing room between sections.
+ *
+ * Markdown bold/asterisks (Suno sometimes wraps lines in **) are stripped.
+ */
+function LyricsView({ lyrics, accent }: { lyrics: string; accent: string }) {
+  const sections = useMemo(() => parseLyrics(lyrics), [lyrics]);
+
+  return (
+    <div>
+      <div className="mb-1.5 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
+        가사
+      </div>
+      <div className="max-h-72 space-y-3 overflow-y-auto rounded-xl bg-brand-paper px-3.5 py-3">
+        {sections.map((sec, i) => (
+          <div key={i}>
+            {sec.label ? (
+              <div className="mb-1 flex items-center gap-2">
+                <span
+                  className="inline-block h-[3px] w-3 rounded-full"
+                  style={{ background: accent }}
+                />
+                <span
+                  className="font-mono text-[10px] uppercase tracking-eyebrow"
+                  style={{ color: accent }}
+                >
+                  {sec.label}
+                </span>
+              </div>
+            ) : null}
+            {sec.lines.map((line, j) => (
+              <p
+                key={j}
+                className="font-sans text-[13px] leading-[1.7] text-brand-ink"
+              >
+                {line}
+              </p>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+interface LyricsSection {
+  label: string | null;
+  lines: string[];
+}
+
+function parseLyrics(raw: string): LyricsSection[] {
+  // Strip markdown bold markers Suno sometimes wraps lines in.
+  const text = raw.replace(/\*\*/g, '').trim();
+  const lines = text.split(/\r?\n/);
+  const sections: LyricsSection[] = [];
+  let current: LyricsSection = { label: null, lines: [] };
+  const sectionHeader = /^\s*\[(.+?)\]\s*$/;
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    const m = sectionHeader.exec(line);
+    if (m) {
+      // Push the previous section if it has any content (or a label).
+      if (current.label || current.lines.length > 0) sections.push(current);
+      current = { label: m[1]!.trim(), lines: [] };
+      continue;
+    }
+    if (!line) continue;
+    current.lines.push(line);
+  }
+  if (current.label || current.lines.length > 0) sections.push(current);
+  // Edge case: lyrics with no section markers at all → wrap as a single
+  // unlabeled block so the user still sees structured text.
+  if (sections.length === 0) sections.push({ label: null, lines: [text] });
+  return sections;
 }
 
 /**

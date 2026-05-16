@@ -133,11 +133,23 @@ export function createSunoAdapter(opts: {
       const r = json.data;
       const clip = r?.sunoData?.[0];
 
+      // sunoapi.org status flow:
+      //   PENDING → TEXT_SUCCESS (lyrics ready, audio generating)
+      //          → FIRST_SUCCESS (streaming audio URL available)
+      //          → SUCCESS       (final MP3 ready)
+      //
+      // Critically, `FIRST_SUCCESS` and `TEXT_SUCCESS` both *contain* the
+      // substring 'SUCCESS'. The previous mapping matched on substring
+      // and short-circuited FIRST_SUCCESS to 'done' — making the UI claim
+      // completion before the MP3 was actually produced. Match by exact
+      // token (or the SUNO_SUCCESS variant some forks use), and let the
+      // intermediate states fall to 'streaming'.
       const status: MusicAdapterResult['status'] = (() => {
         const s = (r?.status ?? '').toUpperCase();
-        if (s.includes('SUCCESS')) return 'done';
-        if (s.includes('FAILED') || s.includes('ERROR')) return 'failed';
-        if (s.includes('STREAMING') || s.includes('FIRST_SUCCESS')) return 'streaming';
+        if (s.includes('FAIL') || s.includes('ERROR') || s === 'TIMEOUT') return 'failed';
+        if (s === 'SUCCESS' || s === 'SUNO_SUCCESS' || s === 'COMPLETE') return 'done';
+        if (s === 'FIRST_SUCCESS' || s === 'TEXT_SUCCESS' || s.includes('STREAMING'))
+          return 'streaming';
         return 'queued';
       })();
       console.info(
