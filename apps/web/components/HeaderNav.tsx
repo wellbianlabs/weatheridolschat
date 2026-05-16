@@ -40,24 +40,37 @@ export default function HeaderNav({
   );
 
   useEffect(() => {
-    const supabase = getBrowserSupabase();
-    if (!supabase) return;
-    let alive = true;
-    const apply = (email: string | null) => {
-      if (!alive) return;
-      setAccount({
-        email,
-        isAdmin: !!email && ADMIN_EMAILS.includes(email.toLowerCase()),
+    // Defensive on purpose — any failure inside here must NEVER
+    // bubble up and break the page. The nav is decoration; the page
+    // content underneath is what users actually came for.
+    try {
+      const supabase = getBrowserSupabase();
+      if (!supabase) return;
+      let alive = true;
+      const apply = (email: string | null) => {
+        if (!alive) return;
+        setAccount({
+          email,
+          isAdmin: !!email && ADMIN_EMAILS.includes(email.toLowerCase()),
+        });
+      };
+      void supabase.auth
+        .getUser()
+        .then(({ data }) => apply(data.user?.email ?? null))
+        .catch((err) => {
+          console.warn('[HeaderNav] getUser failed:', (err as Error).message);
+        });
+      const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+        apply(session?.user?.email ?? null);
       });
-    };
-    void supabase.auth.getUser().then(({ data }) => apply(data.user?.email ?? null));
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      apply(session?.user?.email ?? null);
-    });
-    return () => {
-      alive = false;
-      sub.subscription.unsubscribe();
-    };
+      return () => {
+        alive = false;
+        sub.subscription.unsubscribe();
+      };
+    } catch (err) {
+      console.warn('[HeaderNav] init failed:', (err as Error).message);
+      return;
+    }
   }, []);
 
   const loggedIn = !!account?.email;
