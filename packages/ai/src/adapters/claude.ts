@@ -129,16 +129,55 @@ export function createClaudeAdapter(apiKey: string): ChatAdapter {
           usage: { input: inputTokens, output: outputTokens },
         };
       } catch (err) {
-        const msg = (err as Error).message ?? 'unknown';
-        console.error(`[claude] stream failed: ${msg}`);
-        const userMsg = msg.includes('429') || msg.toLowerCase().includes('rate')
-          ? '잠시 사람이 많이 몰린 것 같아. 1~2초 뒤에 다시 보내줄래?'
-          : '미안, 잠깐 신호가 약했어. 다시 한 번 보내줄래?';
+        // Pull the most informative fields out of an Anthropic SDK
+        // error — they expose .status + a structured .error object.
+        const e = err as Error & {
+          status?: number;
+          error?: { message?: string; type?: string };
+        };
+        const status = e.status;
+        const apiType = e.error?.type;
+        const apiMsg = e.error?.message ?? e.message ?? 'unknown';
+        const fullMsg = `status=${status ?? '?'} type=${apiType ?? '-'} msg="${apiMsg.slice(0, 240)}"`;
+        console.error(`[claude] stream failed ${fullMsg} hasImage=${!!input.userImage}`);
+
+        // Map specific error shapes to actionable Korean copy. The
+        // user no longer sees a generic "신호가 약했어" when in fact
+        // the image was rejected, the key is wrong, or the model
+        // name is invalid — they see exactly what to fix.
+        const userMsg = (() => {
+          const m = apiMsg.toLowerCase();
+          if (input.userImage) {
+            if (status === 400 && (m.includes('image') || m.includes('media'))) {
+              return `사진 분석이 거부됐어요. (${apiMsg.slice(0, 160)}) 다른 사진으로 다시 시도해줄래?`;
+            }
+            if (status === 413 || m.includes('too large') || m.includes('size')) {
+              return '사진이 너무 커서 보낼 수 없었어요. 더 작은 사진으로 다시 시도해주세요.';
+            }
+          }
+          if (status === 401 || m.includes('authentication') || m.includes('invalid api')) {
+            return 'Claude API 키가 거부됐어요. Vercel ANTHROPIC_API_KEY를 확인해주세요.';
+          }
+          if (status === 404 || m.includes('not_found') || m.includes('does not exist')) {
+            return `Claude 모델을 못 찾았어요. (${apiMsg.slice(0, 140)}) 모델 이름을 확인해주세요.`;
+          }
+          if (status === 429 || m.includes('rate') || m.includes('quota')) {
+            return '잠시 사람이 많이 몰린 것 같아. 1~2초 뒤에 다시 보내줄래?';
+          }
+          if (status === 529 || (status && status >= 500)) {
+            return 'Claude 서버가 잠시 불안정해. 1~2분 후 다시 보내줄래?';
+          }
+          if (m.includes('fetch failed') || m.includes('econn') || m.includes('etimedout')) {
+            return 'Claude에 연결하지 못했어요. 네트워크 또는 API 키 환경변수를 확인해주세요.';
+          }
+          return `${input.userImage ? '사진 처리에' : '응답 생성에'} 문제가 있었어요. (${apiMsg.slice(0, 160)})`;
+        })();
+
         for (const c of userMsg) yield { type: 'token', delta: c };
         yield {
           type: 'error',
           code: 'provider_error',
-          message: msg,
+          message: fullMsg,
         };
         yield { type: 'done', finishReason: 'error' };
       }
