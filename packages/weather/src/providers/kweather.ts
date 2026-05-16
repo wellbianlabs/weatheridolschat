@@ -1,4 +1,5 @@
 import type { GeoPoint, WeatherCondition, WeatherSnapshot } from '@wi/core/weather';
+import { kstIsoString } from '@wi/core/time';
 
 import { findNearestSggCode } from './krSggCodes';
 import type { WeatherProvider } from './types';
@@ -114,7 +115,10 @@ export function createKWeatherProvider(rawApiKey: string): WeatherProvider {
 
       return {
         location: { ...point, label },
-        observedAt: new Date().toISOString(),
+        // KMA observations report on the Korean wall-clock so we tag the
+        // ISO with +09:00 instead of converting to UTC. Downstream chat
+        // prompts can read this as-is.
+        observedAt: kstIsoString(),
         temperatureC: round1(data.t1h),
         condition: mapCondition(data.pty ?? 0, data.wIcon ?? 0, data.wText ?? ''),
         humidity: Math.round(data.reh ?? 0),

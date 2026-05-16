@@ -1,5 +1,7 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+import { kstDateString } from '@wi/core/time';
+
 export async function getItem(key: string): Promise<string | null> {
   try {
     return await AsyncStorage.getItem(key);
@@ -31,7 +33,8 @@ export async function setJSON<T>(key: string, value: T): Promise<void> {
 }
 
 export async function getTodayCount(): Promise<number> {
-  const today = new Date().toISOString().slice(0, 10);
+  // KST date — quota rolls over at Korean midnight, not device-local.
+  const today = kstDateString();
   const storedDay = await getItem('wi.usage.day');
   if (storedDay !== today) {
     await setItem('wi.usage.day', today);

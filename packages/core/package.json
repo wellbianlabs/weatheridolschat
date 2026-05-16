@@ -11,7 +11,8 @@
     "./weather": "./src/weather/index.ts",
     "./safeguards": "./src/safeguards/index.ts",
     "./monetization": "./src/monetization/index.ts",
-    "./i18n": "./src/i18n/index.ts"
+    "./i18n": "./src/i18n/index.ts",
+    "./time": "./src/time/index.ts"
   },
   "scripts": {
     "lint": "eslint . --max-warnings 0",

@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 
 import type { Character } from '@wi/core/characters';
 import type { ProductPayload } from '@wi/core/chat';
+import { kstDateString } from '@wi/core/time';
 import type { WeatherSnapshot } from '@wi/core/weather';
 import { Button, Chip, Eyebrow } from '@wi/ui/web';
 
@@ -44,7 +45,10 @@ function storageKey(characterId: string) {
 }
 function getTodayCount(): number {
   if (typeof window === 'undefined') return 0;
-  const today = new Date().toISOString().slice(0, 10);
+  // KST date — the daily quota rolls at 00:00 한국 time, not browser-local
+  // midnight, so a user on a US trip doesn't get a surprise quota reset
+  // when their laptop crosses local midnight.
+  const today = kstDateString();
   const day = localStorage.getItem('wi.usage.day');
   if (day !== today) {
     localStorage.setItem('wi.usage.day', today);

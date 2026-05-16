@@ -4,6 +4,7 @@ import { CHARACTERS } from '@wi/core/characters';
 import { classifyIntent } from '@wi/core/chat';
 import { pickProductForCharacter } from '@wi/core/monetization';
 import { runInputSafeguard } from '@wi/core/safeguards';
+import { formatKstLocalTime } from '@wi/core/time';
 import { pickChatAdapter, SYSTEM_PROMPTS } from '@wi/ai';
 import { getCurrentWeather } from '@wi/weather';
 
@@ -73,7 +74,9 @@ export async function POST(req: Request): Promise<Response> {
           characterSystemPrompt: SYSTEM_PROMPTS[character.id],
           weather,
           history: [],
-          user: { nickname, locale: 'ko', localTime: new Date().toLocaleString('ko-KR'), tier },
+          // localTime is for the LLM's [Now Context] block. Always KST —
+          // server runs in UTC on Vercel, but our characters live in 한국.
+          user: { nickname, locale: 'ko', localTime: formatKstLocalTime(), tier },
           userMessage: text,
           ids: { userMessageId, assistantMessageId },
         })) {
