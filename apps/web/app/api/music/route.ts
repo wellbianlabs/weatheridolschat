@@ -50,7 +50,11 @@ export async function POST(req: Request): Promise<Response> {
   });
 
   const adapter = pickMusicAdapter({ mockMode, sunoApiKey, sunoBaseUrl });
+  console.info(
+    `[music-api] start character=${character.id} adapter=${adapter.id} mockMode=${mockMode} hasSunoKey=${!!sunoApiKey} weather=${weather.condition}`,
+  );
 
+  const t0 = Date.now();
   try {
     const result = await adapter.generate({
       characterId: character.id,
@@ -60,6 +64,9 @@ export async function POST(req: Request): Promise<Response> {
       instrumental: body.instrumental,
       title: body.title,
     });
+    console.info(
+      `[music-api] OK adapter=${adapter.id} taskId=${result.taskId} status=${result.status} ms=${Date.now() - t0}`,
+    );
     return NextResponse.json(result, {
       headers: {
         'X-Provider': adapter.id,
@@ -67,7 +74,9 @@ export async function POST(req: Request): Promise<Response> {
       },
     });
   } catch (err) {
-    return jsonError('provider_error', (err as Error).message, 502);
+    const msg = (err as Error).message ?? 'unknown';
+    console.error(`[music-api] FAIL adapter=${adapter.id} ms=${Date.now() - t0} msg="${msg}"`);
+    return jsonError('provider_error', msg, 502);
   }
 }
 

@@ -1,26 +1,48 @@
 import type { MusicAdapter, MusicAdapterInput, MusicAdapterResult } from '../types';
 
 /**
- * Suno music generation adapter.
- *
- * Targets the sunoapi.org REST surface (the most widely-used third-party
- * Suno wrapper). Switch the base URL via SUNO_API_BASE env if you use a
- * different provider with the same shape.
+ * Suno music generation adapter (sunoapi.org REST surface).
  *
  * Flow:
- *   1. POST /api/v1/generate            → returns { code, data: { taskId } }
+ *   1. POST /api/v1/generate           → returns { code, data: { taskId } }
  *   2. GET  /api/v1/generate/record-info?taskId → status + audio URL once ready
  *
- * Real generation takes 20–60s; we resolve `generate` as soon as the task is
- * accepted ("queued") so the chat UI can render a placeholder card and poll
- * for the final audio.
+ * Real generation takes 20–60s; we resolve `generate` as soon as the task
+ * is accepted ("queued") so the chat UI can render a placeholder card and
+ * poll for the final audio.
+ *
+ * Things that have bitten us before and are worth keeping in mind:
+ *   - `callBackUrl` is REQUIRED by sunoapi.org's validator. We pass a
+ *     placeholder URL because we use polling instead of webhooks —
+ *     they'll POST to it and we'll just ignore the body. Without this
+ *     the API returns 400 "callBackUrl is required" and the song never
+ *     starts.
+ *   - The model name is case-sensitive. `V4_5`, not `v4.5`.
+ *   - `style` + `title` are required when `customMode: true`.
  */
-export function createSunoAdapter(opts: { apiKey: string; baseUrl?: string }): MusicAdapter {
+export function createSunoAdapter(opts: {
+  apiKey: string;
+  baseUrl?: string;
+  /** Optional: where Suno should POST when a task finishes. We poll, so
+   *  this only needs to be reachable enough that Suno's validator
+   *  accepts it. */
+  callbackUrl?: string;
+}): MusicAdapter {
   const base = (opts.baseUrl ?? 'https://api.sunoapi.org').replace(/\/$/, '');
+  const callBackUrl =
+    opts.callbackUrl ??
+    process.env.SUNO_CALLBACK_URL ??
+    // Public bin.unique that just 200s. Suno's validator only checks
+    // that it's a syntactically valid HTTPS URL — it doesn't fail the
+    // task if the webhook itself errors. We rely on polling anyway.
+    'https://webhook.site/00000000-0000-4000-8000-000000000000';
   const headers = {
     'Content-Type': 'application/json',
     Authorization: `Bearer ${opts.apiKey}`,
   } as const;
+  console.info(
+    `[suno] init base=${base} keyLen=${opts.apiKey.length} keyHead=${opts.apiKey.slice(0, 4)}…`,
+  );
 
   return {
     id: 'suno',
@@ -38,24 +60,48 @@ export function createSunoAdapter(opts: { apiKey: string; baseUrl?: string }): M
         style: styleHint,
         title,
         model: 'V4_5',
+        callBackUrl,
       };
+      console.info(
+        `[suno] generate character=${input.characterId} title="${title}" style="${styleHint}" model=V4_5`,
+      );
 
+      const t0 = Date.now();
       const res = await fetch(`${base}/api/v1/generate`, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
       });
+      const text = await res.text();
       if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`Suno generate failed: ${res.status} ${text.slice(0, 200)}`);
+        console.error(`[suno] HTTP ${res.status} body=${text.slice(0, 300)}`);
+        throw new Error(
+          `Suno generate failed: HTTP ${res.status} ${truncate(text, 200)}`,
+        );
       }
-      const json = (await res.json()) as {
-        code?: number;
-        data?: { taskId?: string };
-        msg?: string;
-      };
+
+      let json: { code?: number; data?: { taskId?: string }; msg?: string };
+      try {
+        json = JSON.parse(text);
+      } catch {
+        console.error(`[suno] non-JSON body: ${text.slice(0, 200)}`);
+        throw new Error(`Suno generate: response was not JSON: ${truncate(text, 150)}`);
+      }
+
+      // sunoapi.org returns code !== 200 in the envelope on validation
+      // failures (insufficient credits, invalid params, etc.) even with
+      // HTTP 200. Surface those clearly.
+      if (json.code != null && json.code !== 200) {
+        console.error(`[suno] envelope error code=${json.code} msg=${json.msg ?? ''}`);
+        throw new Error(`Suno generate failed: ${json.msg ?? `code=${json.code}`}`);
+      }
+
       const taskId = json.data?.taskId;
-      if (!taskId) throw new Error(`Suno generate: missing taskId (${json.msg ?? 'unknown'})`);
+      if (!taskId) {
+        console.error(`[suno] missing taskId envelope=${truncate(text, 200)}`);
+        throw new Error(`Suno generate: missing taskId (${json.msg ?? 'unknown'})`);
+      }
+      console.info(`[suno] OK taskId=${taskId} ms=${Date.now() - t0}`);
 
       return {
         taskId,
@@ -70,14 +116,20 @@ export function createSunoAdapter(opts: { apiKey: string; baseUrl?: string }): M
       const url = new URL(`${base}/api/v1/generate/record-info`);
       url.searchParams.set('taskId', taskId);
       const res = await fetch(url.toString(), { headers });
+      const text = await res.text();
       if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`Suno status failed: ${res.status} ${text.slice(0, 200)}`);
+        console.error(`[suno] status HTTP ${res.status} body=${text.slice(0, 200)}`);
+        throw new Error(`Suno status failed: HTTP ${res.status} ${truncate(text, 150)}`);
       }
-      const json = (await res.json()) as {
-        code?: number;
-        data?: SunoRecord;
-      };
+      let json: { code?: number; data?: SunoRecord; msg?: string };
+      try {
+        json = JSON.parse(text);
+      } catch {
+        throw new Error(`Suno status: non-JSON ${truncate(text, 150)}`);
+      }
+      if (json.code != null && json.code !== 200) {
+        throw new Error(`Suno status: ${json.msg ?? `code=${json.code}`}`);
+      }
       const r = json.data;
       const clip = r?.sunoData?.[0];
 
@@ -88,6 +140,9 @@ export function createSunoAdapter(opts: { apiKey: string; baseUrl?: string }): M
         if (s.includes('STREAMING') || s.includes('FIRST_SUCCESS')) return 'streaming';
         return 'queued';
       })();
+      console.info(
+        `[suno] status taskId=${taskId} suno=${r?.status ?? '?'} normalized=${status} hasAudio=${!!(clip?.audioUrl ?? clip?.streamAudioUrl)}`,
+      );
 
       return {
         taskId,
@@ -140,4 +195,9 @@ function defaultTitleFor(characterId: string): string {
       thunder: 'Thunder Down',
     }[characterId] ?? 'Weather Track'
   );
+}
+
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + '…';
 }
