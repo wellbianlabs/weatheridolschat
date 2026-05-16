@@ -1,26 +1,55 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import {
+  GoogleGenerativeAI,
+  HarmBlockThreshold,
+  HarmCategory,
+  type GenerativeModel,
+} from '@google/generative-ai';
 
 import type { ChatAdapter, ChatAdapterInput } from '../types';
 import { buildPrompt } from '@wi/core/chat';
 
 /**
- * Google Gemini adapter (free tier). Streams via generateContentStream.
+ * Google Gemini adapter (free tier).
  *
- * Hardened against the most common "silent empty response" failure modes:
- *  - safety filter triggered → emits a graceful refusal as text
- *  - empty model output     → emits a fallback so the UI never hangs
- *  - quota / 429            → surfaces a friendly retry message
+ * Hardened for production:
+ *  - Model name fallback chain — different AI Studio keys have different
+ *    sets of available models, so we walk a list of stable aliases and
+ *    pick the first one the key has access to.
+ *  - Permissive safety thresholds — we still run our own moderation
+ *    pipeline upstream; we want Gemini to actually answer instead of
+ *    silent-blocking ambiguous Korean prompts.
+ *  - Verbose error logging split across multiple console calls so the
+ *    Vercel log viewer (which truncates) still shows the useful part.
+ *  - Empty-output / safety / quota fallback emits friendly tokens so the
+ *    UI never sticks on the loading dots.
  */
+const MODEL_FALLBACK_CHAIN = [
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-8b',
+  'gemini-1.5-pro',
+];
+
+const SAFETY_SETTINGS = [
+  { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+  { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+  { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+  { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+];
+
 export function createGeminiAdapter(apiKey: string): ChatAdapter {
   const genai = new GoogleGenerativeAI(apiKey);
-  // Pinned to gemini-1.5-flash-latest — stable across @google/generative-ai
-  // v0.21.x. gemini-2.0-* names are routed through v1beta and inconsistently
-  // accepted by some keys, so we stick with the long-supported alias.
-  const MODEL_ID = 'gemini-1.5-flash-latest';
-  const model = genai.getGenerativeModel({
-    model: MODEL_ID,
-    generationConfig: { maxOutputTokens: 1024, temperature: 0.85 },
-  });
+
+  // Lazily-resolved model. We try the first name in the chain; if it 404s
+  // ("model not found for this key"), we walk down the list once and cache
+  // the working name in module scope.
+  let cachedWorkingModelId: string | null = null;
+  function buildModel(modelId: string): GenerativeModel {
+    return genai.getGenerativeModel({
+      model: modelId,
+      generationConfig: { maxOutputTokens: 1024, temperature: 0.85 },
+      safetySettings: SAFETY_SETTINGS,
+    });
+  }
 
   return {
     id: 'gemini',
@@ -40,105 +69,118 @@ export function createGeminiAdapter(apiKey: string): ChatAdapter {
       });
 
       const systemMsg = llmMessages.find((m) => m.role === 'system')?.content ?? '';
-
-      // Gemini requires strict user/model alternation. Use systemInstruction
-      // (added in v1beta) so we don't need to fake it as a turn-0 user message.
       const history = llmMessages
         .filter((m) => m.role !== 'system')
         .map((m) => ({
           role: m.role === 'assistant' ? 'model' : 'user',
           parts: [{ text: m.content }],
         }));
-
       const contents = [
         ...history,
         { role: 'user', parts: [{ text: input.userMessage }] },
       ];
 
-      yield {
-        type: 'meta',
-        userMessageId: input.ids.userMessageId,
-        assistantMessageId: input.ids.assistantMessageId,
-        model: MODEL_ID,
-      };
+      // Decide model order this call: cached first if we have one.
+      const order = cachedWorkingModelId
+        ? [cachedWorkingModelId, ...MODEL_FALLBACK_CHAIN.filter((m) => m !== cachedWorkingModelId)]
+        : [...MODEL_FALLBACK_CHAIN];
 
-      try {
-        // systemInstruction accepts a plain string in v0.21.x — keep it simple
-        // and avoid the Content/Part shape that varies between SDK versions.
-        const result = await model.generateContentStream({
-          contents,
-          systemInstruction: systemMsg,
-        });
+      let lastError: Error | null = null;
+      let modelUsed = order[0]!;
 
-        let outputText = '';
-        for await (const chunk of result.stream) {
-          let delta = '';
-          try {
-            delta = chunk.text();
-          } catch (e) {
-            // chunk.text() throws when the chunk has no text (e.g., function call,
-            // safety-blocked). Ignore — we'll inspect the final response below.
+      for (const modelId of order) {
+        try {
+          modelUsed = modelId;
+          const model = buildModel(modelId);
+
+          yield {
+            type: 'meta',
+            userMessageId: input.ids.userMessageId,
+            assistantMessageId: input.ids.assistantMessageId,
+            model: modelId,
+          };
+
+          const result = await model.generateContentStream({
+            contents,
+            systemInstruction: systemMsg,
+          });
+
+          let outputText = '';
+          for await (const chunk of result.stream) {
+            let delta = '';
+            try {
+              delta = chunk.text();
+            } catch {
+              /* chunk had no text (safety / function call) */
+            }
+            if (delta) {
+              outputText += delta;
+              yield { type: 'token', delta };
+            }
           }
-          if (delta) {
-            outputText += delta;
-            yield { type: 'token', delta };
+
+          const final = await result.response;
+          const candidate = final.candidates?.[0];
+          const finishReason = candidate?.finishReason;
+          const blockReason = final.promptFeedback?.blockReason;
+          const usage = final.usageMetadata;
+
+          if (!outputText) {
+            console.warn(
+              `[gemini] empty output model=${modelId} finishReason=${finishReason ?? '?'} blockReason=${blockReason ?? '-'}`,
+            );
+            const fallback =
+              blockReason || finishReason === 'SAFETY'
+                ? '음… 그 이야기는 잠시 미뤄도 될까? 다른 얘기 들려줘.'
+                : finishReason === 'RECITATION'
+                  ? '아, 그건 다른 말로 풀어볼게. 다시 물어봐줘.'
+                  : '잠시 생각이 안 떠오르네. 한 번 더 말해줄래?';
+            for (const c of fallback) yield { type: 'token', delta: c };
           }
+
+          // Success — cache the working model name.
+          cachedWorkingModelId = modelId;
+
+          yield {
+            type: 'done',
+            finishReason: outputText ? 'stop' : 'safety',
+            usage: {
+              input: usage?.promptTokenCount ?? 0,
+              output: usage?.candidatesTokenCount ?? outputText.length,
+            },
+          };
+          return; // exit generator on first success
+        } catch (err) {
+          lastError = err as Error;
+          const msg = lastError.message ?? '';
+          // Split logs so Vercel's truncation doesn't hide the useful bits.
+          console.error(`[gemini] FAIL model=${modelId}`);
+          console.error(`[gemini] err.name=${lastError.name}`);
+          console.error(`[gemini] err.msg=${msg.slice(0, 200)}`);
+          if (msg.length > 200) console.error(`[gemini] err.msg.cont=${msg.slice(200, 400)}`);
+
+          const is404 =
+            msg.includes('404') ||
+            msg.toLowerCase().includes('not found') ||
+            msg.toLowerCase().includes('was not found');
+          if (is404) continue; // try next model in chain
+
+          // Non-404 → bail out immediately (auth, quota, etc.)
+          break;
         }
-
-        const final = await result.response;
-        const candidate = final.candidates?.[0];
-        const finishReason = candidate?.finishReason;
-        const blockReason = final.promptFeedback?.blockReason;
-        const usage = final.usageMetadata;
-
-        // Log to Vercel runtime so we can diagnose empty/blocked responses.
-        if (!outputText) {
-          console.warn(
-            `[gemini] empty response — finishReason=${finishReason ?? '?'} ` +
-              `blockReason=${blockReason ?? '-'} ` +
-              `safetyRatings=${JSON.stringify(candidate?.safetyRatings ?? [])} ` +
-              `userMessage="${input.userMessage.slice(0, 80)}"`,
-          );
-
-          // Emit a user-visible fallback so the bubble never hangs on "···".
-          const fallback = blockReason
-            ? '음… 그 이야기는 잠시 미뤄도 될까? 다른 얘기 들려줘.'
-            : finishReason === 'SAFETY'
-              ? '음… 그 이야기는 잠시 미뤄도 될까? 다른 얘기 들려줘.'
-              : finishReason === 'RECITATION'
-                ? '아, 그건 다른 말로 풀어볼게. 다시 물어봐줘.'
-                : '잠시 생각이 안 떠오르네. 한 번 더 말해줄래?';
-          for (const c of fallback) {
-            yield { type: 'token', delta: c };
-          }
-        }
-
-        yield {
-          type: 'done',
-          finishReason: outputText ? 'stop' : 'safety',
-          usage: {
-            input: usage?.promptTokenCount ?? 0,
-            output: usage?.candidatesTokenCount ?? outputText.length,
-          },
-        };
-      } catch (err) {
-        const msg = (err as Error).message ?? 'unknown';
-        console.error(`[gemini] stream failed: ${msg}`);
-
-        // Friendly fallback text so the user doesn't see a blank bubble.
-        const userMsg = msg.includes('429') || msg.toLowerCase().includes('quota')
-          ? '잠시 사람이 많이 몰린 것 같아. 1~2초 뒤에 다시 보내줄래?'
-          : '미안, 잠깐 신호가 약했어. 다시 한 번 보내줄래?';
-        for (const c of userMsg) {
-          yield { type: 'token', delta: c };
-        }
-        yield {
-          type: 'error',
-          code: 'provider_error',
-          message: msg,
-        };
-        yield { type: 'done', finishReason: 'error' };
       }
+
+      // All models failed (or non-404 bail).
+      const msg = lastError?.message ?? 'unknown';
+      console.error(`[gemini] ALL_MODELS_FAILED lastModel=${modelUsed} lastErr=${msg.slice(0, 120)}`);
+      const userMsg = msg.toLowerCase().includes('quota') || msg.includes('429')
+        ? '잠시 사람이 많이 몰린 것 같아. 1~2초 뒤에 다시 보내줄래?'
+        : msg.toLowerCase().includes('not found') || msg.includes('404')
+          ? '어… 모델 연결이 잠깐 끊겼어. 운영자에게 알려줄래?'
+          : '미안, 잠깐 신호가 약했어. 다시 한 번 보내줄래?';
+      for (const c of userMsg) yield { type: 'token', delta: c };
+      yield { type: 'error', code: 'provider_error', message: msg };
+      yield { type: 'done', finishReason: 'error' };
     },
   };
 }
