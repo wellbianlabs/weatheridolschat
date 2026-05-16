@@ -1,7 +1,9 @@
 import Link from 'next/link';
 
 import { CHARACTER_LIST } from '@wi/core/characters';
-import { Button, Card, Chip, Eyebrow, Wordmark } from '@wi/ui/web';
+import { Button, Card, Chip, Eyebrow } from '@wi/ui/web';
+
+import HeaderNav from '@/components/HeaderNav';
 
 export default function LandingPage() {
   return (
@@ -37,22 +39,9 @@ export default function LandingPage() {
             }}
           />
 
-          {/* Top nav floats above everything */}
-          <header className="absolute inset-x-0 top-0 z-20 mx-auto flex max-w-6xl items-center justify-between px-8 py-6">
-            <Wordmark size="sm" showSubtitle={false} />
-            <nav className="flex items-center gap-2">
-              <Link href="/characters">
-                <Button variant="ghost" size="sm">
-                  Characters
-                </Button>
-              </Link>
-              <Link href="/onboarding">
-                <Button variant="accent" size="sm">
-                  시작하기
-                </Button>
-              </Link>
-            </nav>
-          </header>
+          {/* Top nav — login-state aware. Renders the same shape on
+              every public page so users always know where to sign in. */}
+          <HeaderNav variant="transparent" />
 
           {/* Hero copy — constrained to the left cream column. */}
           <div className="relative z-10 mx-auto flex h-full max-w-6xl items-center px-8">

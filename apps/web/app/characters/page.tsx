@@ -5,7 +5,9 @@ import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
 import { CHARACTER_LIST } from '@wi/core/characters';
-import { Button, Card, Chip, Eyebrow, Wordmark } from '@wi/ui/web';
+import { Button, Card, Chip, Eyebrow } from '@wi/ui/web';
+
+import HeaderNav from '@/components/HeaderNav';
 
 export default function CharactersPage() {
   const router = useRouter();
@@ -24,18 +26,12 @@ export default function CharactersPage() {
 
   return (
     <main className="bg-dreamy min-h-screen">
-      <header className="mx-auto flex max-w-6xl items-center justify-between px-8 py-6">
-        <Link
-          href="/"
-          className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
-        >
-          ← Home
-        </Link>
-        <Wordmark size="sm" showSubtitle={false} />
+      <HeaderNav />
+      <div className="mx-auto flex max-w-6xl justify-end px-8 pt-3">
         <Button variant="ghost" size="sm" onClick={() => router.push('/onboarding')}>
           닉네임 변경
         </Button>
-      </header>
+      </div>
 
       <section className="mx-auto max-w-6xl px-8 pt-12 pb-8">
         <Eyebrow>★ Hello, {nickname}</Eyebrow>

@@ -9,6 +9,8 @@ import {
 } from '@wi/core/monetization';
 import { Eyebrow } from '@wi/ui/web';
 
+import HeaderNav from '@/components/HeaderNav';
+
 import CheckoutButton from './checkout-button';
 
 export const dynamic = 'force-dynamic';
@@ -36,15 +38,10 @@ export default function PricingPage({
   const fmt = (n: number) => (Number.isFinite(n) ? n.toLocaleString() : '∞');
 
   return (
-    <main className="mx-auto min-h-screen max-w-3xl px-6 py-12 bg-dreamy-vertical">
-      <Link
-        href="/"
-        className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
-      >
-        ← Home
-      </Link>
-
-      <header className="mt-8">
+    <main className="bg-dreamy-vertical min-h-screen">
+      <HeaderNav />
+      <div className="mx-auto max-w-3xl px-6 py-12">
+      <header>
         <Eyebrow>★ Pricing</Eyebrow>
         <h1 className="mt-3 font-display text-4xl font-medium leading-tight tracking-tight text-brand-ink">
           매일 더 깊은 대화로.
@@ -168,6 +165,7 @@ export default function PricingPage({
       <p className="mt-12 text-center font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
         무료 한도는 매일 자정(KST)에 자동 리셋돼요. 구독은 언제든 해지 가능.
       </p>
+      </div>
     </main>
   );
 }

@@ -1,10 +1,11 @@
 'use client';
 
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
 import { Button, Eyebrow, Wordmark } from '@wi/ui/web';
+
+import HeaderNav from '@/components/HeaderNav';
 
 export default function OnboardingPage() {
   const router = useRouter();
@@ -25,17 +26,7 @@ export default function OnboardingPage() {
 
   return (
     <main className="bg-dreamy-vertical flex min-h-screen flex-col">
-      <header className="mx-auto flex w-full max-w-3xl items-center justify-between px-8 py-6">
-        <Link
-          href="/"
-          className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
-        >
-          ← Home
-        </Link>
-        <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
-          Step 01 / 01
-        </span>
-      </header>
+      <HeaderNav />
 
       <div className="mx-auto flex w-full max-w-xl flex-1 flex-col justify-center px-8 pb-24">
         <Wordmark size="md" />
