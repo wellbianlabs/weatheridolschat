@@ -13,8 +13,12 @@ import { buildPrompt } from '@wi/core/chat';
  */
 export function createGeminiAdapter(apiKey: string): ChatAdapter {
   const genai = new GoogleGenerativeAI(apiKey);
+  // Pinned to gemini-1.5-flash-latest — stable across @google/generative-ai
+  // v0.21.x. gemini-2.0-* names are routed through v1beta and inconsistently
+  // accepted by some keys, so we stick with the long-supported alias.
+  const MODEL_ID = 'gemini-1.5-flash-latest';
   const model = genai.getGenerativeModel({
-    model: 'gemini-2.0-flash',
+    model: MODEL_ID,
     generationConfig: { maxOutputTokens: 1024, temperature: 0.85 },
   });
 
@@ -55,13 +59,15 @@ export function createGeminiAdapter(apiKey: string): ChatAdapter {
         type: 'meta',
         userMessageId: input.ids.userMessageId,
         assistantMessageId: input.ids.assistantMessageId,
-        model: 'gemini-2.0-flash',
+        model: MODEL_ID,
       };
 
       try {
+        // systemInstruction accepts a plain string in v0.21.x — keep it simple
+        // and avoid the Content/Part shape that varies between SDK versions.
         const result = await model.generateContentStream({
           contents,
-          systemInstruction: { role: 'system', parts: [{ text: systemMsg }] },
+          systemInstruction: systemMsg,
         });
 
         let outputText = '';
