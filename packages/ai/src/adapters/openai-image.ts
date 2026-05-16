@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+
 import OpenAI, { toFile } from 'openai';
 
 import { buildImagePrompt } from '../prompts/image/base';
@@ -46,9 +49,13 @@ export function createOpenAIImageAdapter(apiKey: string): ImageAdapter {
 
         if (input.referenceImageUrl) {
           const referenceBuffer = await fetchImageBuffer(input.referenceImageUrl);
+          console.info(
+            `[oai-image] ref loaded src=${input.referenceImageUrl} bytes=${referenceBuffer.length}`,
+          );
           const referenceFile = await toFile(referenceBuffer, 'reference.png', {
             type: 'image/png',
           });
+          console.info('[oai-image] calling images.edit gpt-image-1');
           const result = await client.images.edit({
             model: 'gpt-image-1',
             image: referenceFile,
@@ -58,6 +65,7 @@ export function createOpenAIImageAdapter(apiKey: string): ImageAdapter {
           });
           imageUrl = extractImageUrl(result);
         } else {
+          console.info('[oai-image] calling images.generate gpt-image-1');
           const result = await client.images.generate({
             model: 'gpt-image-1',
             prompt,
@@ -123,15 +131,45 @@ export function createOpenAIImageAdapter(apiKey: string): ImageAdapter {
   };
 }
 
+/**
+ * Read a reference image into a Buffer.
+ *
+ * For relative URLs ("/reference/sunny.png") we read directly from the
+ * filesystem — Vercel copies the `public/` dir into the lambda's working
+ * directory, so this is faster AND removes the dependency on
+ * `NEXT_PUBLIC_APP_URL` being reachable from the serverless function (a
+ * mis-set or missing app URL was producing the cryptic "fetch failed"
+ * with no HTTP status, because Node's fetch can't even open a TCP
+ * connection to the wrong host).
+ *
+ * Absolute URLs still go through HTTP — useful if someone wires a
+ * CDN-hosted reference later.
+ */
 async function fetchImageBuffer(url: string): Promise<Buffer> {
-  // Relative URL → resolve against APP_URL (server-side fetch).
-  const absolute = url.startsWith('http')
-    ? url
-    : `${process.env.NEXT_PUBLIC_APP_URL ?? 'http://localhost:3000'}${url}`;
-  const res = await fetch(absolute);
-  if (!res.ok) throw new Error(`Failed to fetch reference image (${absolute}): ${res.status}`);
-  const arrayBuffer = await res.arrayBuffer();
-  return Buffer.from(arrayBuffer);
+  if (url.startsWith('http')) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return Buffer.from(await res.arrayBuffer());
+    } catch (err) {
+      throw new Error(
+        `Failed to fetch reference image from URL (${url}): ${(err as Error).message}`,
+      );
+    }
+  }
+
+  // Relative path → read from disk. process.cwd() on Vercel = /var/task,
+  // which contains the bundled `public/` dir. On local dev it's the
+  // app root. Strip the leading slash so `path.join` doesn't reset to /.
+  const rel = url.startsWith('/') ? url.slice(1) : url;
+  const filePath = path.join(process.cwd(), 'public', rel);
+  try {
+    return await readFile(filePath);
+  } catch (err) {
+    throw new Error(
+      `Failed to read reference image from disk (${filePath}): ${(err as Error).message}`,
+    );
+  }
 }
 
 function extractImageUrl(result: {
@@ -185,6 +223,11 @@ function isRecoverable(reason: string): boolean {
     r.includes('not allowed') ||
     r.includes('status=403') ||
     r.includes('status=404') ||
-    (r.includes('status=400') && r.includes('model'))
+    (r.includes('status=400') && r.includes('model')) ||
+    // Reference-image load failures: dall-e-3 doesn't take a reference,
+    // so retrying without it on the text prompt alone will succeed.
+    r.includes('failed to fetch reference image') ||
+    r.includes('failed to read reference image') ||
+    r.includes('fetch failed')
   );
 }
