@@ -40,25 +40,50 @@ interface KmaResponse {
   };
 }
 
-export function createKWeatherProvider(serviceKey: string): WeatherProvider {
+/**
+ * Normalize the service key to the *decoded* form. data.go.kr shows the key
+ * in two variants ("일반 인증키 Encoding" vs "Decoding"); users frequently
+ * paste the wrong one. If the value still contains percent escapes we
+ * decode it once so URLSearchParams can encode it cleanly without double-
+ * encoding (which is the #1 cause of KMA 401 responses).
+ */
+function normalizeServiceKey(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed.includes('%')) return trimmed;
+  try {
+    return decodeURIComponent(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+export function createKWeatherProvider(rawServiceKey: string): WeatherProvider {
+  const serviceKey = normalizeServiceKey(rawServiceKey);
+  const decodedAtBoot = serviceKey !== rawServiceKey.trim();
+  if (decodedAtBoot) {
+    console.warn('[kweather] service key contained %-escapes; decoded once before use');
+  }
   return {
     id: 'kweather',
     async fetchCurrent(point: GeoPoint): Promise<WeatherSnapshot> {
       const { nx, ny } = latLngToKmaGrid(point.lat, point.lng);
       const { baseDate, baseTime } = kmaBaseDateTime(new Date());
 
-      const url = new URL(BASE_URL);
-      url.searchParams.set('serviceKey', serviceKey);
-      url.searchParams.set('pageNo', '1');
-      url.searchParams.set('numOfRows', '20');
-      url.searchParams.set('dataType', 'JSON');
-      url.searchParams.set('base_date', baseDate);
-      url.searchParams.set('base_time', baseTime);
-      url.searchParams.set('nx', String(nx));
-      url.searchParams.set('ny', String(ny));
+      // Build query manually so we control encoding exactly once. Using
+      // url.searchParams.set with already-encoded values triggers double
+      // encoding on +, /, = characters.
+      const params = new URLSearchParams();
+      params.set('serviceKey', serviceKey);
+      params.set('pageNo', '1');
+      params.set('numOfRows', '20');
+      params.set('dataType', 'JSON');
+      params.set('base_date', baseDate);
+      params.set('base_time', baseTime);
+      params.set('nx', String(nx));
+      params.set('ny', String(ny));
+      const url = `${BASE_URL}?${params.toString()}`;
 
-      const res = await fetch(url.toString(), {
-        // KMA can be slow — keep a generous timeout but never block forever
+      const res = await fetch(url, {
         signal: AbortSignal.timeout(10_000),
       });
       if (!res.ok) {
