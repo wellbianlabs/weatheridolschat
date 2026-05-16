@@ -90,29 +90,32 @@ Mock 날씨 → 실제 관측 데이터:
 
 ```bash
 # === Phase 4: Live Weather ===
-# KMA 기상청 (한국 좌표면 우선 사용 — 정부 무료 공개 API)
-KWEATHER_API_KEY=<data.go.kr 발급 Decoded Service Key>
-# 해외 좌표 fallback (선택)
+# KWeather B2B 게이트웨이 (한국 좌표면 우선 사용 — 읍면동 3,559개 단위 실황)
+KW_API_KEY=<KWeather 계약 키 (raw, URL 인코딩 X)>
+# 글로벌 fallback (선택) — 키 없어도 Open-Meteo 가 자동으로 받음
 OPENWEATHERMAP_API_KEY=<32자 hex>
 ```
 
-| Vercel 변수 | 발급처 | 직접 링크 | 키 형식 | 무료 한도 |
-| :-- | :-- | :-- | :-- | :-- |
-| `KWEATHER_API_KEY` | 공공데이터포털 (data.go.kr) | [data.go.kr](https://www.data.go.kr) → 검색 **"단기예보조회서비스"** → 활용 신청 | URL-디코딩된 인증키 (영숫자+`/`+`=`) | **1M calls / month** 무료, 한국만 |
-| `OPENWEATHERMAP_API_KEY` | OpenWeather | [openweathermap.org/api](https://openweathermap.org/api) → "Current Weather Data" → 무료 가입 | 32자 hex (예: `1a2b3c4d...`) | 60 calls/min, 1M/월 |
+| Vercel 변수 | 발급처 | 키 형식 | 한도 |
+| :-- | :-- | :-- | :-- |
+| `KW_API_KEY` | KWeather 주식회사 (B2B 계약) | 32자 영숫자 (예: `A8XHpOD...`) | 계약별 |
+| `OPENWEATHERMAP_API_KEY` | OpenWeather ([api keys](https://home.openweathermap.org/api_keys)) | 32자 hex | 60/min, 1M/월 무료 |
 
-> **라우팅 동작**:
-> - 좌표가 한국(위도 33–38.6, 경도 124.5–132) 안 + `KWEATHER_API_KEY` 있음 → KMA 사용 (정부 데이터)
-> - 그 외 + `OPENWEATHERMAP_API_KEY` 있음 → OpenWeatherMap
-> - 둘 다 없으면 Mock
+> **라우팅 캐스케이드** (위부터 시도):
+> 1. **KWeather B2B** — 한국 좌표 + `KW_API_KEY` 있음
+>    - `kw-gis-gps`로 GPS → 행정동 코드 (10자리)
+>    - `kw-odam1` (읍면동 실황) → 실패 시 `kw-odam2` (시군구) → `kw-odam3` (광역)
+> 2. **OpenWeatherMap** — `OPENWEATHERMAP_API_KEY` 있음
+> 3. **Open-Meteo** — 키 없이 항상 동작, 전 세계 커버리지 (최종 fallback)
+> 4. 전부 실패하면 Mock 스냅샷 (채팅은 계속 동작)
 
-> **KMA 발급 팁**:
-> 1. data.go.kr 가입 후 "단기예보조회서비스" 활용 신청 (즉시 승인)
-> 2. 마이페이지 → "오픈 API" → 해당 서비스의 **"일반 인증키(Decoding)"** 값을 복사
-> 3. Vercel `KWEATHER_API_KEY`에 붙여넣기. URL 인코딩은 우리 코드가 자동 처리.
-> 4. 첫 호출은 활성화까지 **최대 1시간** 소요 가능.
+> **KWeather 키 발급 팁**:
+> 1. KWeather 영업 담당과 B2B 계약 체결 (`gateway.kweather.co.kr:8443` 접근 권한)
+> 2. 발급받은 `api_key` 32자 영숫자 값을 **그대로** 붙여넣기 — URL 인코딩 금지
+> 3. data.go.kr 공공 API 와는 다른 서비스: data.go.kr 키는 여기 안 됨
+> 4. 레거시 환경변수명 `KWEATHER_API_KEY` 도 자동 인식하지만 새 키는 `KW_API_KEY` 권장
 
-> **OpenWeather 발급 팁**: 키 활성화는 가입 후 **최대 2시간**. 활성화 안 됐을 때 자동으로 Mock 폴백.
+> **OpenWeather 발급 팁**: 키 활성화는 가입 후 **최대 2시간**. 활성화 안 됐을 때 자동으로 Open-Meteo 폴백.
 
 ---
 

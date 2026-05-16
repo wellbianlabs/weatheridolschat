@@ -54,8 +54,9 @@ OPENAI_API_KEY=sk-...
 ### 실제 날씨 (선택)
 
 ```
-OPENWEATHERMAP_API_KEY=...
-KWEATHER_API_KEY=...   # (옵션)
+KW_API_KEY=...                # KWeather B2B 계약 키 (한국 읍면동 단위 실황)
+OPENWEATHERMAP_API_KEY=...    # 글로벌 fallback (선택)
+# Open-Meteo 는 키 없이 최종 fallback 으로 항상 동작
 ```
 
 ## 4) 배포 트리거

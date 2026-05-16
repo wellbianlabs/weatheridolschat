@@ -27,7 +27,10 @@ export const ServerEnvSchema = z.object({
   GEMINI_API_KEY: stringOrEmpty,
   OPENAI_API_KEY: stringOrEmpty,
 
-  // Weather
+  // Weather. KW_API_KEY is the new name (KWeather B2B gateway); we keep
+  // KWEATHER_API_KEY in the schema for back-compat — route handlers read
+  // KW_API_KEY first and fall through to the legacy name automatically.
+  KW_API_KEY: stringOrEmpty,
   KWEATHER_API_KEY: stringOrEmpty,
   OPENWEATHERMAP_API_KEY: stringOrEmpty,
 

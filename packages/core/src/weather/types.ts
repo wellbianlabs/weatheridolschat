@@ -25,5 +25,5 @@ export interface WeatherSnapshot {
   windKph: number;
   precipitationMm: number;
   aqi: number;
-  provider: 'kweather' | 'openweathermap' | 'mock';
+  provider: 'kweather' | 'openweathermap' | 'openmeteo' | 'mock';
 }

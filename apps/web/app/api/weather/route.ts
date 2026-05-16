@@ -13,7 +13,9 @@ export async function GET(req: Request): Promise<Response> {
 
   const mockMode = process.env.MOCK_MODE !== 'false';
   const openWeatherMapApiKey = process.env.OPENWEATHERMAP_API_KEY || undefined;
-  const kweatherApiKey = process.env.KWEATHER_API_KEY || undefined;
+  // Accept the new env var name (`KW_API_KEY`) first and fall through to the
+  // legacy `KWEATHER_API_KEY` name so existing deployments keep working.
+  const kweatherApiKey = process.env.KW_API_KEY || process.env.KWEATHER_API_KEY || undefined;
 
   try {
     const snapshot = await getCurrentWeather(

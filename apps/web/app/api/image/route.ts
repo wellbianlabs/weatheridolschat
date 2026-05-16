@@ -36,7 +36,7 @@ export async function POST(req: Request): Promise<Response> {
   const mockMode = process.env.MOCK_MODE !== 'false';
   const openaiApiKey = process.env.OPENAI_API_KEY || undefined;
   const openWeatherMapApiKey = process.env.OPENWEATHERMAP_API_KEY || undefined;
-  const kweatherApiKey = process.env.KWEATHER_API_KEY || undefined;
+  const kweatherApiKey = process.env.KW_API_KEY || process.env.KWEATHER_API_KEY || undefined;
 
   const point = body.locationHint ?? { lat: 37.498, lng: 127.028, label: '서울 강남구' };
   const weather = await getCurrentWeather(point, {
