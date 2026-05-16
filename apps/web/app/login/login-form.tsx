@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { getBrowserSupabase } from '@/lib/supabase/browser';
 
@@ -25,6 +25,37 @@ export default function LoginForm() {
   const [status, setStatus] = useState<'idle' | 'sending' | 'sent' | 'error'>('idle');
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [oauthBusy, setOauthBusy] = useState<'google' | 'kakao' | null>(null);
+
+  // Supabase puts auth errors in the URL fragment (#error=...) when a
+  // magic-link verify fails — e.g. otp_expired, access_denied. The
+  // server can't see fragments, so /auth/callback redirected here
+  // with the unhelpful "missing_code" query. Pick the real reason
+  // out of the hash and translate to Korean so the user knows what
+  // to do next.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const hash = window.location.hash?.slice(1) ?? '';
+    if (!hash) return;
+    const params = new URLSearchParams(hash);
+    const errCode = params.get('error_code');
+    const errDesc = params.get('error_description');
+    if (!errCode && !errDesc) return;
+    const friendly = (() => {
+      switch (errCode) {
+        case 'otp_expired':
+          return '매직 링크가 만료됐어요. (1시간 후 만료) 새로 받기 버튼을 다시 눌러주세요.';
+        case 'access_denied':
+          return '인증이 취소되거나 거절됐어요.';
+        default:
+          return errDesc?.replace(/\+/g, ' ') ?? `OAuth 에러 (${errCode ?? 'unknown'})`;
+      }
+    })();
+    setStatus('error');
+    setErrMsg(friendly);
+    // Strip the hash from the URL so a page refresh doesn't keep
+    // showing the stale error.
+    window.history.replaceState(null, '', window.location.pathname + window.location.search);
+  }, []);
 
   async function signInWithProvider(provider: 'google' | 'kakao') {
     const supabase = getBrowserSupabase();
