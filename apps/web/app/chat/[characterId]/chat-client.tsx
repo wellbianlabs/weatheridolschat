@@ -43,6 +43,10 @@ const SHORTCUTS = [
 function storageKey(characterId: string) {
   return `wi.chat.${characterId}`;
 }
+function truncate(s: string | undefined, n: number): string {
+  if (!s) return 'unknown';
+  return s.length <= n ? s : s.slice(0, n - 1) + '…';
+}
 function getTodayCount(): number {
   if (typeof window === 'undefined') return 0;
   // KST date — the daily quota rolls at 00:00 한국 time, not browser-local
@@ -237,15 +241,46 @@ export default function ChatClient({ character }: { character: Character }) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ characterId: character.id, userPrompt: text, intent: 'selfie' }),
           });
-          const data = (await imgRes.json()) as { imageUrl?: string };
-          setMessages((prev) =>
-            prev.map((m) => (m.id === imageId ? { ...m, imageUrl: data.imageUrl, pending: false } : m)),
-          );
-        } catch {
+          // Check HTTP status BEFORE trusting the body. A 502 from the
+          // image route still parses as JSON ({error:{...}}) and would
+          // otherwise leave imageUrl undefined → silently empty bubble.
+          const data = (await imgRes.json()) as {
+            imageUrl?: string;
+            error?: { code?: string; message?: string };
+          };
+          if (!imgRes.ok || !data.imageUrl) {
+            const reason = data.error?.message ?? `HTTP ${imgRes.status}`;
+            // Friendly Korean copy + the server reason in parens so the
+            // user can paste it to us when reporting issues.
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === imageId
+                  ? {
+                      ...m,
+                      kind: 'text',
+                      content: `사진을 그리지 못했어. (${truncate(reason, 140)})`,
+                      pending: false,
+                    }
+                  : m,
+              ),
+            );
+          } else {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === imageId ? { ...m, imageUrl: data.imageUrl, pending: false } : m,
+              ),
+            );
+          }
+        } catch (err) {
           setMessages((prev) =>
             prev.map((m) =>
               m.id === imageId
-                ? { ...m, kind: 'text', content: '(이미지를 보내지 못했어요)', pending: false }
+                ? {
+                    ...m,
+                    kind: 'text',
+                    content: `사진 요청이 끊겼어. (${truncate((err as Error).message, 120)})`,
+                    pending: false,
+                  }
                 : m,
             ),
           );

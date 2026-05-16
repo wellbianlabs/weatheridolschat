@@ -45,7 +45,11 @@ export async function POST(req: Request): Promise<Response> {
     openWeatherMapApiKey,
   });
   const adapter = pickImageAdapter({ mockMode, openaiApiKey });
+  console.info(
+    `[image-api] start character=${character.id} adapter=${adapter.id} mockMode=${mockMode} hasOpenAI=${!!openaiApiKey} weather=${weather.condition}`,
+  );
 
+  const t0 = Date.now();
   try {
     const result = await adapter.generate({
       characterId: character.id,
@@ -54,20 +58,28 @@ export async function POST(req: Request): Promise<Response> {
       intent: body.intent ?? 'selfie',
       referenceImageUrl: character.referenceImageUrl,
     });
+    console.info(
+      `[image-api] OK model=${result.model} ms=${Date.now() - t0} adapter=${adapter.id}`,
+    );
 
-    return NextResponse.json({
-      imageUrl: result.imageUrl,
-      prompt: result.prompt,
-      seed: result.seed,
-      model: result.model,
-      width: result.width,
-      height: result.height,
-      weatherCondition: weather.condition,
-    });
-  } catch (err) {
     return NextResponse.json(
-      { error: { code: 'provider_error', message: (err as Error).message } },
-      { status: 502 },
+      {
+        imageUrl: result.imageUrl,
+        prompt: result.prompt,
+        seed: result.seed,
+        model: result.model,
+        width: result.width,
+        height: result.height,
+        weatherCondition: weather.condition,
+      },
+      { headers: { 'X-Adapter': adapter.id, 'X-Image-Model': result.model } },
+    );
+  } catch (err) {
+    const msg = (err as Error).message ?? 'unknown';
+    console.error(`[image-api] FAIL adapter=${adapter.id} ms=${Date.now() - t0} msg="${msg}"`);
+    return NextResponse.json(
+      { error: { code: 'provider_error', message: msg } },
+      { status: 502, headers: { 'X-Adapter': adapter.id } },
     );
   }
 }
