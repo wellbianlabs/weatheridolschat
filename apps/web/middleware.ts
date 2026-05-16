@@ -23,9 +23,28 @@ import { createServerClient } from '@supabase/ssr';
  * If Supabase env vars aren't configured the middleware is an immediate
  * no-op.
  */
+/** Inline URL normalizer (same rules as lib/supabase/{server,browser}.ts).
+ *  Edge middleware can't import from app code reliably, so we duplicate
+ *  the 8-line check here rather than chase shared-module boundaries. */
+function normalizeUrl(raw: string | undefined): string | null {
+  if (!raw) return null;
+  let s = raw.trim();
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+    s = s.slice(1, -1).trim();
+  }
+  s = s.replace(/\/+$/, '');
+  try {
+    const u = new URL(s);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+    return u.toString().replace(/\/+$/, '');
+  } catch {
+    return null;
+  }
+}
+
 export async function middleware(request: NextRequest) {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const url = normalizeUrl(process.env.NEXT_PUBLIC_SUPABASE_URL);
+  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim();
   if (!url || !anon) return NextResponse.next();
 
   let response = NextResponse.next({ request });
