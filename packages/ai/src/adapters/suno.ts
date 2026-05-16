@@ -131,7 +131,22 @@ export function createSunoAdapter(opts: {
         throw new Error(`Suno status: ${json.msg ?? `code=${json.code}`}`);
       }
       const r = json.data;
-      const clip = r?.sunoData?.[0];
+
+      // Locate the first generated clip. sunoapi.org has shipped at
+      // least two response shapes over the past year:
+      //
+      //   v1: { data: { sunoData: [...], status, param } }
+      //   v2: { data: { response: { sunoData: [...] }, status, param } }
+      //
+      // (Some forks also use `data.tracks` or `data.clips`.) Walk every
+      // plausible location so a backend tweak doesn't silently produce
+      // a "완성!" card with no audio URL — which is exactly what was
+      // happening: the previous code only looked at `data.sunoData`
+      // and returned undefined when the server moved the array under
+      // `response.sunoData`. Status SUCCESS still parsed correctly
+      // (data.status), so the card flipped to 'done' but the player
+      // had nothing to play.
+      const clip = findFirstClip(r);
 
       // sunoapi.org status flow:
       //   PENDING → TEXT_SUCCESS (lyrics ready, audio generating)
@@ -152,21 +167,41 @@ export function createSunoAdapter(opts: {
           return 'streaming';
         return 'queued';
       })();
-      console.info(
-        `[suno] status taskId=${taskId} suno=${r?.status ?? '?'} normalized=${status} hasAudio=${!!(clip?.audioUrl ?? clip?.streamAudioUrl)}`,
-      );
-
+      const audioUrl =
+        clip?.audioUrl ?? clip?.streamAudioUrl ?? clip?.audio_url ?? undefined;
       // sunoapi.org puts the actual sung lyrics under `prompt` in custom
-      // mode, but Suno-compatible providers sometimes also use `lyric`,
-      // `lyrics`, or `text`. Try them in priority order so we never lose
-      // the lyrics to a field-name mismatch.
+      // mode, but other Suno-compatible providers may use lyric/lyrics/text.
       const lyrics =
         clip?.lyric ?? clip?.lyrics ?? clip?.text ?? clip?.prompt ?? undefined;
 
+      // If the upstream claims SUCCESS but we still didn't locate an
+      // audio URL, the response shape probably shifted again. Log a
+      // sample so we can teach findFirstClip about it — but DON'T let
+      // the UI claim completion: downgrade to 'streaming' so the
+      // polling loop tries again instead of freezing on a card that
+      // says "완성!" with no player.
+      let finalStatus = status;
+      if (finalStatus === 'done' && !audioUrl) {
+        console.warn(
+          `[suno] status=done but no audioUrl. dataKeys=${Object.keys(r ?? {}).join(',')} ` +
+            `responseKeys=${
+              r && typeof r === 'object' && 'response' in r
+                ? Object.keys((r as { response?: object }).response ?? {}).join(',')
+                : '-'
+            } clipKeys=${clip ? Object.keys(clip).join(',') : 'none'} ` +
+            `bodyHead=${text.slice(0, 500)}`,
+        );
+        finalStatus = 'streaming';
+      }
+
+      console.info(
+        `[suno] status taskId=${taskId} suno=${r?.status ?? '?'} normalized=${finalStatus} hasAudio=${!!audioUrl}`,
+      );
+
       return {
         taskId,
-        status,
-        audioUrl: clip?.audioUrl ?? clip?.streamAudioUrl,
+        status: finalStatus,
+        audioUrl,
         durationMs:
           typeof clip?.duration === 'number' ? Math.round(clip.duration * 1000) : undefined,
         title: clip?.title,
@@ -178,20 +213,51 @@ export function createSunoAdapter(opts: {
   };
 }
 
+interface SunoClip {
+  audioUrl?: string;
+  streamAudioUrl?: string;
+  audio_url?: string;
+  duration?: number;
+  title?: string;
+  prompt?: string;
+  /** Alternate lyric field names seen across Suno-compatible providers. */
+  lyric?: string;
+  lyrics?: string;
+  text?: string;
+}
 interface SunoRecord {
   status?: string;
   param?: string;
-  sunoData?: Array<{
-    audioUrl?: string;
-    streamAudioUrl?: string;
-    duration?: number;
-    title?: string;
-    prompt?: string;
-    /** Alternate lyric field names seen across Suno-compatible providers. */
-    lyric?: string;
-    lyrics?: string;
-    text?: string;
-  }>;
+  /** v1 shape: clips directly on `data`. */
+  sunoData?: SunoClip[];
+  /** v2 shape (current sunoapi.org): clips nested one level deeper. */
+  response?: {
+    sunoData?: SunoClip[];
+    tracks?: SunoClip[];
+    clips?: SunoClip[];
+  };
+  /** Snake-case forks. */
+  tracks?: SunoClip[];
+  clips?: SunoClip[];
+}
+
+/** Walk every plausible field where a Suno-compatible provider has been
+ *  observed to put the first generated clip. Returns the first non-empty
+ *  array's first element, or undefined if none of the locations holds one. */
+function findFirstClip(r: SunoRecord | undefined): SunoClip | undefined {
+  if (!r) return undefined;
+  const candidates: Array<SunoClip[] | undefined> = [
+    r.sunoData,
+    r.response?.sunoData,
+    r.response?.tracks,
+    r.response?.clips,
+    r.tracks,
+    r.clips,
+  ];
+  for (const arr of candidates) {
+    if (Array.isArray(arr) && arr.length > 0) return arr[0];
+  }
+  return undefined;
 }
 
 function defaultStyleFor(characterId: string): string {
