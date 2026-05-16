@@ -111,7 +111,24 @@ export async function POST(req: Request): Promise<Response> {
   } catch (err) {
     const msg = (err as Error).message ?? 'unknown';
     console.error(`[music-api] FAIL adapter=${adapter.id} ms=${Date.now() - t0} msg="${msg}"`);
-    return jsonError('provider_error', msg, 502);
+    // Even when Suno fails, the Gemini-generated lyrics are still
+    // useful — show them in the card so the user can read the words
+    // we wrote even though there's no audio. The client looks for
+    // `lyrics` + `title` on the error envelope and renders them.
+    return NextResponse.json(
+      {
+        error: { code: 'provider_error', message: msg },
+        lyrics: preLyrics,
+        title: preTitle,
+      },
+      {
+        status: 502,
+        headers: {
+          'X-Provider': adapter.id,
+          ...(lyricsModel ? { 'X-Lyrics-Model': lyricsModel } : {}),
+        },
+      },
+    );
   }
 }
 

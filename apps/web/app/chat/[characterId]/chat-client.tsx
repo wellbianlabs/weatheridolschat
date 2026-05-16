@@ -17,10 +17,20 @@ interface MusicTrack {
   title?: string;
   audioUrl?: string;
   lyrics?: string;
-  status: 'queued' | 'streaming' | 'done' | 'failed';
+  /**
+   * Full lifecycle of a weather song:
+   *
+   *   writing_lyrics → queued → streaming → done
+   *                                       ↘
+   *                                          failed (from anywhere)
+   *
+   * `writing_lyrics` is OUR step (Gemini) — happens before the song
+   * even reaches Suno. The remaining states track Suno's pipeline.
+   */
+  status: 'writing_lyrics' | 'queued' | 'streaming' | 'done' | 'failed';
   error?: string;
-  /** Epoch ms when the task started (POST /api/music returned). Used to
-   *  drive the progress bar — Suno doesn't expose a real percentage. */
+  /** Epoch ms when the task started (chip click). Drives the progress
+   *  bar — neither Gemini nor Suno expose a real percentage. */
   startedAt?: number;
   /** Number of GET /api/music poll attempts so far. Helps the user tell
    *  "actively working" from "stuck waiting". */
@@ -214,9 +224,16 @@ export default function ChatClient({ character }: { character: Character }) {
         ),
       );
 
-    updateMusic({ status: 'queued', pollCount: 0 }, true);
+    // Initial visible state is 'writing_lyrics' — the chip click is
+    // synchronous, but the server-side Gemini call takes 3-5s before
+    // anything else can happen. Showing this phase explicitly tells
+    // the user "we're working on the words first" instead of a vague
+    // generic spinner.
+    updateMusic({ status: 'writing_lyrics', pollCount: 0 }, true);
 
-    // ── Kickoff ─────────────────────────────────────────────────────
+    // ── Kickoff (Gemini lyrics + Suno enqueue, server-side) ─────────
+    // The /api/music route does both steps internally — when it
+    // returns we should already have lyrics and a Suno taskId.
     let kickoff: {
       taskId?: string;
       title?: string;
@@ -239,7 +256,18 @@ export default function ChatClient({ character }: { character: Character }) {
       kickoff = await res.json();
       if (!res.ok || !kickoff.taskId) {
         const reason = kickoff.error?.message ?? `HTTP ${res.status}`;
-        updateMusic({ status: 'failed', error: truncate(reason, 140) }, false);
+        // Preserve any lyrics the server managed to generate before
+        // failing — so the user at least gets to see what Gemini
+        // wrote, even though Suno couldn't sing it.
+        updateMusic(
+          {
+            status: 'failed',
+            error: truncate(reason, 200),
+            lyrics: kickoff.lyrics,
+            title: kickoff.title,
+          },
+          false,
+        );
         delete songAbortersRef.current[songId];
         return;
       }
@@ -824,7 +852,11 @@ function WeatherSongCard({
   // Tick once a second so elapsed time + progress bar refresh while the
   // task is in flight. Stops ticking once the track is terminal.
   const [, setTick] = useState(0);
-  const isActive = track.active && (track.status === 'queued' || track.status === 'streaming');
+  const isActive =
+    track.active &&
+    (track.status === 'writing_lyrics' ||
+      track.status === 'queued' ||
+      track.status === 'streaming');
   useEffect(() => {
     if (!isActive) return;
     const id = window.setInterval(() => setTick((n) => n + 1), 1000);
@@ -837,20 +869,25 @@ function WeatherSongCard({
     ? Math.max(0, Math.round((Date.now() - track.startedAt) / 1000))
     : 0;
 
-  // Synthetic progress bar percentage.
-  //   queued: 0 → 60% over 30s
-  //   streaming: 60 → 95% over the next 30s
-  //   done: 100% instantly
-  //   failed: keep last value (bar fades to ink-soft)
+  // Synthetic progress bar — three observable phases laid end-to-end
+  // along the bar so the user can see where in the pipeline we are:
+  //   writing_lyrics (Gemini) : 0  →  20% over ~5s
+  //   queued        (Suno q)  : 20 →  35% over ~5s
+  //   streaming     (Suno mix): 35 →  95% over ~40s
+  //   done                    : 100% instantly
+  //   failed                  : freeze where we were
   let pct = 0;
   if (track.status === 'done') pct = 100;
-  else if (track.status === 'failed') pct = Math.min(95, (elapsedSec / 30) * 60);
-  else if (track.status === 'queued') pct = Math.min(60, (elapsedSec / 30) * 60);
+  else if (track.status === 'writing_lyrics') pct = Math.min(20, (elapsedSec / 5) * 20);
+  else if (track.status === 'queued')
+    pct = 20 + Math.min(15, ((elapsedSec - 5) / 5) * 15);
   else if (track.status === 'streaming')
-    pct = Math.min(95, 60 + ((elapsedSec - 30) / 30) * 35);
+    pct = 35 + Math.min(60, ((elapsedSec - 10) / 40) * 60);
+  else if (track.status === 'failed') pct = Math.max(8, Math.min(95, pct || 25));
 
   let statusCopy = '';
-  if (track.status === 'queued') statusCopy = '작사하는 중';
+  if (track.status === 'writing_lyrics') statusCopy = '가사 쓰는 중';
+  else if (track.status === 'queued') statusCopy = '음악 만들기 시작';
   else if (track.status === 'streaming') statusCopy = '녹음하는 중';
   else if (track.status === 'done') statusCopy = '완성!';
   else if (track.status === 'failed') statusCopy = '실패';
