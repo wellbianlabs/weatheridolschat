@@ -59,21 +59,45 @@ interface VoiceConfig {
  * route below only forwards it when the voice is a Neural2/Wavenet
  * one that actually supports it.
  */
+/**
+ * Per-character voice presets.
+ *
+ * All four characters are 19-22yo K-pop idols, so the baseline target
+ * is "young, bright, perky, slightly hi-toned". User feedback on the
+ * previous mature-sounding settings: 목소리가 전체적으로 쳐져있고 나이들어
+ * 보여. The fix:
+ *
+ *   1. Pick the *youngest-timbred* Chirp3-HD voices Google ships for
+ *      ko-KR (Leda > Zephyr > Kore for youthfulness; Aoede sounds the
+ *      most mature, so we drop it from main slots).
+ *   2. audioConfig.speakingRate goes UP (1.08–1.18) for the K-pop
+ *      "fast and light" energy.
+ *   3. Pitch lift moves entirely into the SSML prosody envelope below
+ *      because Chirp3-HD ignores the audioConfig pitch field. We push
+ *      pitch +2.5 to +4 semitones across the board — that's the
+ *      delta that makes a voice read as "young female idol" instead
+ *      of "smooth narrator".
+ *
+ * audioConfig.pitch is only used by Neural2 fallback (supportsPitch
+ * gate); we keep meaningful values here so fallback also sounds young.
+ */
 const VOICE_PRESETS: Record<CharacterId, VoiceConfig> = {
-  // Bright honey-blonde idol → bright/friendly Leda
-  sunny: { voice: 'ko-KR-Chirp3-HD-Leda', rate: 1.0, pitch: 0 },
-  // Introspective lo-fi mood → warm/melancholic Aoede, slower
-  rain: { voice: 'ko-KR-Chirp3-HD-Aoede', rate: 0.94, pitch: 0 },
-  // Dreamy daydream artist → calm/soft Kore
-  cloudy: { voice: 'ko-KR-Chirp3-HD-Kore', rate: 0.97, pitch: 0 },
-  // Confident rebellious rapper → energetic/sharp Zephyr, faster
-  thunder: { voice: 'ko-KR-Chirp3-HD-Zephyr', rate: 1.06, pitch: 0 },
+  // 햇살같은 밝음, 가장 활기찬 → Leda (brightest), fastest
+  sunny: { voice: 'ko-KR-Chirp3-HD-Leda', rate: 1.12, pitch: 3.5 },
+  // 차분하지만 19세 → 같은 Leda 보이스인데 살짝 천천히 + 부드러움.
+  // 이전 Aoede는 성숙해서 빠짐 — Rain도 분명히 어린 톤이어야 함.
+  rain: { voice: 'ko-KR-Chirp3-HD-Leda', rate: 1.04, pitch: 2.5 },
+  // 18세, 가장 어린 — Kore 자체 음색이 성숙해서 pitch shift로 강하게
+  // 끌어올림. 몽환은 SSML pitch로, "어림"은 high pitch로.
+  cloudy: { voice: 'ko-KR-Chirp3-HD-Kore', rate: 1.08, pitch: 4.0 },
+  // 21세, 빠르고 단단함 — Zephyr 자체가 가장 에너제틱
+  thunder: { voice: 'ko-KR-Chirp3-HD-Zephyr', rate: 1.16, pitch: 3.0 },
 };
 
 const DEFAULT_VOICE: VoiceConfig = {
-  voice: 'ko-KR-Chirp3-HD-Aoede',
-  rate: 1.0,
-  pitch: 0.0,
+  voice: 'ko-KR-Chirp3-HD-Leda',
+  rate: 1.1,
+  pitch: 3.0,
 };
 
 /** True for voices that accept the legacy `pitch` audioConfig field.
@@ -104,14 +128,40 @@ function chirpToNeural2(chirpName: string): string {
  * Chirp3-HD enforces these only loosely (the model can override for
  * naturalness); Neural2 fallback respects them strictly.
  */
-const CHARACTER_PROSODY: Record<CharacterId, { rate: string; pitch: string; volume: string }> = {
-  sunny: { rate: '105%', pitch: '+1st', volume: 'medium' }, // bright, slightly higher
-  rain: { rate: '92%', pitch: '-1st', volume: 'soft' }, // soft, slower, lower
-  cloudy: { rate: '96%', pitch: '-0.5st', volume: 'medium' }, // dreamy, mid-low
-  thunder: { rate: '108%', pitch: '-1.5st', volume: 'loud' }, // sharp, fast, grounded
+/**
+ * Per-character SSML envelope. The whole utterance is wrapped in this
+ * <prosody>, then sentence-level overrides stack on top inside it.
+ *
+ * Anchor for all four: **young female K-pop idol (19~22yo)**. That
+ * means pitch never drops below the speaker's natural register — we
+ * shift everyone UP by +2 to +4 semitones to get out of the "smooth
+ * narrator / mature woman" zone Chirp3-HD lands in by default.
+ *
+ * Rate is also pushed up across the board (102%–115%) for the "빠르고
+ * 경쾌" feel. Volume stays at medium-loud so nobody mumbles.
+ *
+ * Differentiation is by *degree*, not direction — Sunny is the most
+ * lifted, Rain is the gentlest of the bright voices (still high, just
+ * less pushed), Cloudy is dreamy young, Thunder is sharpest.
+ */
+/**
+ * The envelope intentionally has NO `rate` field — rate is driven
+ * entirely by audioConfig.speakingRate (one source of truth, otherwise
+ * we double-multiply with SSML and end up at 1.3x+ which sounds
+ * chipmunked). The envelope only controls pitch (so the voice sits in
+ * the young-female register) and volume (so nobody mumbles).
+ *
+ * Sentence-level overrides below DO use rate as a small relative
+ * bonus — but only for emphasis spans, not the whole utterance.
+ */
+const CHARACTER_PROSODY: Record<CharacterId, { pitch: string; volume: string }> = {
+  sunny: { pitch: '+3.5st', volume: 'medium' }, // 가장 발랄
+  rain: { pitch: '+2.5st', volume: 'medium' }, // 부드럽지만 young
+  cloudy: { pitch: '+4st', volume: 'medium' }, // 가장 어린 톤
+  thunder: { pitch: '+3st', volume: 'loud' }, // 단단한 young
 };
 
-const DEFAULT_PROSODY = { rate: '100%', pitch: '0st', volume: 'medium' } as const;
+const DEFAULT_PROSODY = { pitch: '+3st', volume: 'medium' } as const;
 
 /**
  * Convert raw text into emotion-aware SSML for natural-sounding TTS.
@@ -134,30 +184,39 @@ function textToSsml(text: string, characterId: CharacterId | undefined): string 
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  // Split into sentences (Korean + English terminators), wrap each
-  // emotional sentence in its own <prosody> so excitement/playful
-  // tone is concentrated in the right place rather than averaged
-  // across the whole reply.
+  // Sentence-level emotional overrides stack INSIDE the character
+  // envelope. All deltas keep the voice in the bright/young register:
+  // excitement adds even more pitch+rate, playfulness adds a tiny
+  // pitch lift, questions left alone. We deliberately do NOT drop
+  // pitch or slow rate anymore — user feedback was that the previous
+  // sad/wistful override pulled the voice toward "쳐진" mature tone.
   const SENTENCE = /([^.!?…]+[.!?…]+|[^.!?…]+$)/g;
   const wrapped = escaped.replace(SENTENCE, (chunk) => {
     const trimmed = chunk.trim();
     if (!trimmed) return chunk;
-    // Excited — multiple !s or "!!" → noticeably higher pitch + rate
-    if (/!{2,}|❗❗+/.test(trimmed) || /\b(와|우와|진짜|대박|짱)\b.*!/.test(trimmed)) {
-      return `<prosody pitch="+1.5st" rate="108%">${chunk}</prosody>`;
+    // Excited — multiple !s or "와/우와/진짜/대박/짱..!"
+    if (/!{2,}/.test(trimmed) || /\b(와|우와|진짜|대박|짱|헐|좋아)\b.*!/.test(trimmed)) {
+      return `<prosody pitch="+2st" rate="110%">${chunk}</prosody>`;
     }
     // Mild excitement — single !
     if (/!\s*$/.test(trimmed)) {
-      return `<prosody pitch="+0.5st" rate="103%">${chunk}</prosody>`;
+      return `<prosody pitch="+1st" rate="105%">${chunk}</prosody>`;
     }
-    // Playful / drawn-out — trailing ~ or ~~
+    // Playful / drawn-out — trailing ~ or ~~ → small pitch lift,
+    // very slight slow for the trailing-vowel feel, but staying high
     if (/~+\s*$/.test(trimmed)) {
-      return `<prosody rate="95%" pitch="+0.3st">${chunk}</prosody>`;
+      return `<prosody rate="98%" pitch="+1.5st">${chunk}</prosody>`;
     }
-    // Sad/wistful — Korean sadness cues
-    if (/(슬프|쓸쓸|외로|아쉽|아련|그립)/.test(trimmed)) {
-      return `<prosody rate="88%" volume="soft" pitch="-0.8st">${chunk}</prosody>`;
+    // Question — small pitch lift on the closing syllable (Chirp3-HD
+    // already handles ?-intonation, this just nudges it). Not slowed.
+    if (/\?\s*$/.test(trimmed)) {
+      return `<prosody pitch="+0.5st">${chunk}</prosody>`;
     }
+    // Note: removed the sad/wistful slowdown — it was making the
+    // voice read as a mature narrator instead of a 19~21yo idol.
+    // Sadness now comes through naturally via Chirp3-HD's content-
+    // aware prosody, without the SSML pulling the whole sentence
+    // into a low/slow register.
     return chunk;
   });
 
@@ -172,9 +231,10 @@ function textToSsml(text: string, characterId: CharacterId | undefined): string 
       '$1$2<break time="140ms"/>$3',
     );
 
-  // Wrap everything in the character's emotional baseline.
+  // Wrap everything in the character's emotional baseline. Rate is
+  // intentionally NOT set here — see CHARACTER_PROSODY's doc comment.
   const p = (characterId && CHARACTER_PROSODY[characterId]) ?? DEFAULT_PROSODY;
-  return `<speak><prosody rate="${p.rate}" pitch="${p.pitch}" volume="${p.volume}">${withBreaks}</prosody></speak>`;
+  return `<speak><prosody pitch="${p.pitch}" volume="${p.volume}">${withBreaks}</prosody></speak>`;
 }
 
 const MAX_CHARS = 4500; // Google TTS rejects > 5000 chars; leave headroom.
