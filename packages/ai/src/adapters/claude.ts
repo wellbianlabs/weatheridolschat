@@ -57,10 +57,13 @@ export function createClaudeAdapter(apiKey: string): ChatAdapter {
 
         let inputTokens = 0;
         let outputTokens = 0;
+        let outputText = '';
 
         for await (const event of stream) {
           if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-            yield { type: 'token', delta: event.delta.text };
+            const delta = event.delta.text;
+            outputText += delta;
+            yield { type: 'token', delta };
           }
           if (event.type === 'message_delta' && event.usage) {
             outputTokens = event.usage.output_tokens ?? outputTokens;
@@ -70,16 +73,30 @@ export function createClaudeAdapter(apiKey: string): ChatAdapter {
           }
         }
 
+        if (!outputText) {
+          console.warn(
+            `[claude] empty response — userMessage="${input.userMessage.slice(0, 80)}"`,
+          );
+          const fallback = '잠시 생각이 안 떠오르네. 한 번 더 말해줄래?';
+          for (const c of fallback) yield { type: 'token', delta: c };
+        }
+
         yield {
           type: 'done',
-          finishReason: 'stop',
+          finishReason: outputText ? 'stop' : 'safety',
           usage: { input: inputTokens, output: outputTokens },
         };
       } catch (err) {
+        const msg = (err as Error).message ?? 'unknown';
+        console.error(`[claude] stream failed: ${msg}`);
+        const userMsg = msg.includes('429') || msg.toLowerCase().includes('rate')
+          ? '잠시 사람이 많이 몰린 것 같아. 1~2초 뒤에 다시 보내줄래?'
+          : '미안, 잠깐 신호가 약했어. 다시 한 번 보내줄래?';
+        for (const c of userMsg) yield { type: 'token', delta: c };
         yield {
           type: 'error',
           code: 'provider_error',
-          message: (err as Error).message,
+          message: msg,
         };
         yield { type: 'done', finishReason: 'error' };
       }

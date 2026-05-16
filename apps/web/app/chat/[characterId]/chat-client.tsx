@@ -151,6 +151,7 @@ export default function ChatClient({ character }: { character: Character }) {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let assistant = '';
+      let sawError: string | null = null;
       // eslint-disable-next-line no-constant-condition
       while (true) {
         const { value, done } = await reader.read();
@@ -165,6 +166,7 @@ export default function ChatClient({ character }: { character: Character }) {
               type: string;
               delta?: string;
               name?: string;
+              message?: string;
               payload?: { kind?: string } & Record<string, unknown>;
             };
             if (evt.type === 'token' && evt.delta) {
@@ -178,12 +180,33 @@ export default function ChatClient({ character }: { character: Character }) {
               imageIntentTriggered = true;
             } else if (evt.type === 'attachment' && evt.payload?.kind === 'product') {
               productCard = evt.payload as unknown as ProductPayload;
+            } else if (evt.type === 'error') {
+              sawError = evt.message ?? 'unknown';
             }
           } catch {
             /* partial */
           }
         }
       }
+
+      // Stream ended without any token AND no fallback text → show a visible
+      // error instead of leaving the bubble stuck on "···".
+      if (!assistant) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantId
+              ? {
+                  ...m,
+                  content: sawError
+                    ? `응답을 받지 못했어요. (${sawError})`
+                    : '응답이 비어있어요. 잠시 후 다시 시도해주세요.',
+                  pending: false,
+                }
+              : m,
+          ),
+        );
+      }
+
       setUsage(bumpTodayCount());
 
       if (productCard) {
