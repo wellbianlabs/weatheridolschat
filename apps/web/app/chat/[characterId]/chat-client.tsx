@@ -246,10 +246,15 @@ export default function ChatClient({ character }: { character: Character }) {
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [weather, setWeather] = useState<WeatherSnapshot | null>(null);
-  const [paywallOpen, setPaywallOpen] = useState(false);
   const [usage, setUsage] = useState(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const lastUserMessageRef = useRef<string | null>(null);
+
+  // Paywall trigger — set whenever a 429 (rate_limit) bounces back
+  // from one of the quota-gated routes. Shape declared at module
+  // scope (see PaywallReason interface below) so the standalone
+  // PaywallModal component can share the same type.
+  const [paywall, setPaywall] = useState<PaywallReason | null>(null);
   // Per-song AbortControllers so the "취소" button on the music card can
   // stop the polling loop without affecting other in-flight songs.
   const songAbortersRef = useRef<Record<string, AbortController>>({});
@@ -452,6 +457,14 @@ export default function ChatClient({ character }: { character: Character }) {
         const data = (await res.json().catch(() => ({}))) as {
           error?: { message?: string };
         };
+        if (res.status === 429) {
+          const tier = (res.headers.get('X-Tier') ?? 'free') as PaywallReason['tier'];
+          setPaywall({
+            feature: 'tts_chars',
+            tier,
+            message: data.error?.message ?? `HTTP ${res.status}`,
+          });
+        }
         throw new Error(data.error?.message ?? `HTTP ${res.status}`);
       }
       const blob = await res.blob();
@@ -572,6 +585,10 @@ export default function ChatClient({ character }: { character: Character }) {
           },
           false,
         );
+        if (res.status === 429) {
+          const tier = (res.headers.get('X-Tier') ?? 'free') as PaywallReason['tier'];
+          setPaywall({ feature: 'songs', tier, message: reason });
+        }
         delete songAbortersRef.current[songId];
         return;
       }
@@ -670,10 +687,11 @@ export default function ChatClient({ character }: { character: Character }) {
     // in "이 사진 어때?" server-side so the LLM gets a real prompt.
     if (sending) return;
     if (!text && !pendingImage) return;
-    if (getTodayCount() >= MAX_FREE_MESSAGES) {
-      setPaywallOpen(true);
-      return;
-    }
+    // Phase 3: paywall is triggered by 429 from the server, not by
+    // the client-side counter. MAX_FREE_MESSAGES is left as a stub
+    // (Infinity) so this branch never fires; the real gate lives in
+    // /api/chat's consumeQuota() call.
+    if (getTodayCount() >= MAX_FREE_MESSAGES) return;
     // Snapshot then clear UI state — the image is sent as part of
     // this turn and must not stick around for the next message.
     const attachedImage = pendingImage;
@@ -725,8 +743,12 @@ export default function ChatClient({ character }: { character: Character }) {
       // Non-2xx responses (e.g. 503 no_vision_provider, 400 validation,
       // 429 rate_limit) come back as JSON, not SSE. Surface the
       // server's message into the assistant bubble directly so the
-      // user sees what to fix (which env var to set, etc.) instead
-      // of "응답이 비어있어요".
+      // user sees what to fix.
+      //
+      // 429 specifically also pops the paywall modal — that's the
+      // signal we use to convert daily-cap hits into a subscription
+      // upsell. The X-Quota-Field header tells us which feature
+      // hit the wall (messages vs vision when an image was attached).
       if (!res.ok) {
         const errBody = (await res.json().catch(() => ({}))) as {
           error?: { code?: string; message?: string };
@@ -737,6 +759,11 @@ export default function ChatClient({ character }: { character: Character }) {
             m.id === assistantId ? { ...m, content: reason, pending: false } : m,
           ),
         );
+        if (res.status === 429) {
+          const field = (res.headers.get('X-Quota-Field') ?? 'messages') as PaywallReason['feature'];
+          const tier = (res.headers.get('X-Tier') ?? 'free') as PaywallReason['tier'];
+          setPaywall({ feature: field, tier, message: reason });
+        }
         return;
       }
       if (!res.body) throw new Error('no_body');
@@ -850,6 +877,10 @@ export default function ChatClient({ character }: { character: Character }) {
                   : m,
               ),
             );
+            if (imgRes.status === 429) {
+              const tier = (imgRes.headers.get('X-Tier') ?? 'free') as PaywallReason['tier'];
+              setPaywall({ feature: 'selfies', tier, message: reason });
+            }
           } else {
             setMessages((prev) =>
               prev.map((m) =>
@@ -1159,40 +1190,13 @@ export default function ChatClient({ character }: { character: Character }) {
           </form>
         </div>
 
-        {paywallOpen ? (
-          <div className="fixed inset-0 z-50 flex items-end justify-center bg-brand-ink/40 p-4 md:items-center">
-            <div className="w-full max-w-md rounded-3xl bg-white p-8 shadow-xl">
-              <Eyebrow>★ Premium</Eyebrow>
-              <h2 className="mt-3 font-display text-3xl font-medium leading-tight tracking-tight text-brand-ink">
-                {character.displayName}와 더 깊게 이야기하기.
-              </h2>
-              <p className="mt-3 font-sans text-[15px] leading-relaxed text-brand-ink-soft">
-                오늘 무료 메시지를 모두 사용했어요. 프리미엄으로 무제한 대화와 깊이 있는 모델로 이어가요.
-              </p>
-              <ul className="mt-4 space-y-2 font-sans text-sm text-brand-ink-soft">
-                <li>· 메시지 무제한 (30 → ∞)</li>
-                <li>· 깊이 있는 Claude 모델</li>
-                <li>· 이미지 50/일, 장기 기억, 광고 제거</li>
-              </ul>
-              <div className="mt-6 flex gap-2">
-                <Button variant="secondary" size="md" fullWidth onClick={() => setPaywallOpen(false)}>
-                  다음에
-                </Button>
-                <Button
-                  variant="accent"
-                  size="md"
-                  fullWidth
-                  accentColor={character.accentColor}
-                  onClick={() => {
-                    localStorage.setItem('wi.waitlist', '1');
-                    setPaywallOpen(false);
-                  }}
-                >
-                  관심 등록
-                </Button>
-              </div>
-            </div>
-          </div>
+        {paywall ? (
+          <PaywallModal
+            reason={paywall}
+            characterDisplayName={character.displayName}
+            accentColor={character.accentColor}
+            onClose={() => setPaywall(null)}
+          />
         ) : null}
       </main>
     </WeatherBackground>
@@ -1862,6 +1866,144 @@ function parseLyrics(raw: string): LyricsSection[] {
   // unlabeled block so the user still sees structured text.
   if (sections.length === 0) sections.push({ label: null, lines: [text] });
   return sections;
+}
+
+/**
+ * Quota-triggered paywall modal.
+ *
+ * Pops the moment a quota-gated API route returns 429. Copy differs
+ * by:
+ *
+ *   tier=anon     → "Sign up to unlock" with /login CTA
+ *   tier=free     → "Upgrade to Premium" with /pricing CTA
+ *   tier=premium  → "내일 다시 만나" (premium hit their already-
+ *                   generous daily cap; nothing more to upsell, just
+ *                   reassure)
+ *
+ * The `feature` field also tunes the headline so the user sees the
+ * specific reason ("셀카 한도", "날씨송 한도", etc.) instead of a
+ * generic "limit reached".
+ */
+interface PaywallReason {
+  feature: 'messages' | 'selfies' | 'songs' | 'tts_chars' | 'vision';
+  tier: 'anon' | 'free' | 'premium' | 'admin';
+  message?: string;
+}
+
+const FEATURE_LABEL: Record<PaywallReason['feature'], string> = {
+  messages: '오늘의 대화',
+  selfies: '오늘의 셀카',
+  songs: '오늘의 날씨송',
+  tts_chars: '오늘의 음성',
+  vision: '오늘의 사진 분석',
+};
+
+function PaywallModal({
+  reason,
+  characterDisplayName,
+  accentColor,
+  onClose,
+}: {
+  reason: PaywallReason;
+  characterDisplayName: string;
+  accentColor: string;
+  onClose: () => void;
+}) {
+  const featureLabel = FEATURE_LABEL[reason.feature];
+
+  // Per-tier headline + body + primary CTA.
+  let headline: string;
+  let body: string;
+  let primaryLabel: string;
+  let primaryHref: string;
+  if (reason.tier === 'anon') {
+    headline = `로그인하고 ${characterDisplayName}와 더 깊게.`;
+    body = `${featureLabel} 한도가 다 차서 잠시 멈췄어요. 무료로 가입하면 매일 더 많은 대화와 ${reason.feature === 'selfies' ? '셀카' : reason.feature === 'songs' ? '날씨송' : '기능'}을 쓸 수 있어요.`;
+    primaryLabel = '로그인 / 가입하기';
+    primaryHref = '/login';
+  } else if (reason.tier === 'premium' || reason.tier === 'admin') {
+    headline = '내일 다시 만나.';
+    body = `오늘 정해진 ${featureLabel} 한도를 다 썼어요. 자정(KST) 지나면 새 하루로 자동 충전됩니다.`;
+    primaryLabel = '확인';
+    primaryHref = '#';
+  } else {
+    headline = 'Premium으로 한도를 늘려보자.';
+    body = `${featureLabel} 무료 한도를 다 썼어요. Premium 구독자는 셀카 20장 · 날씨송 3곡 · 대화 200회까지 매일 가능해요.`;
+    primaryLabel = '플랜 보기';
+    primaryHref = '/pricing';
+  }
+
+  // Per-feature highlight bullets — different teaser depending on
+  // what they tried to do.
+  const bullets: string[] = (() => {
+    switch (reason.feature) {
+      case 'selfies':
+        return ['셀카 1 → 20장/일', '날씨에 맞는 의상/배경', 'Reference 얼굴 일관성'];
+      case 'songs':
+        return ['날씨송 0 → 3곡/일', 'Gemini 가사 + Suno V4.5', 'MP3 다운로드'];
+      case 'vision':
+        return ['사진 분석 3 → 50회/일', 'Claude Vision 풀 분석', '캐릭터 보이스로 답변'];
+      case 'tts_chars':
+        return ['음성 듣기 무제한', '캐릭터별 보이스', 'MP3 다운로드'];
+      case 'messages':
+      default:
+        return ['메시지 30 → 200/일', '깊이 있는 Claude 모델', '장기 기억 + 광고 제거'];
+    }
+  })();
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-brand-ink/40 p-4 md:items-center"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-3xl bg-white p-8 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <Eyebrow>★ {reason.tier === 'anon' ? 'Sign up' : 'Premium'}</Eyebrow>
+        <h2 className="mt-3 font-display text-3xl font-medium leading-tight tracking-tight text-brand-ink">
+          {headline}
+        </h2>
+        <p className="mt-3 font-sans text-[15px] leading-relaxed text-brand-ink-soft">
+          {body}
+        </p>
+        <ul className="mt-4 space-y-2 font-sans text-sm text-brand-ink-soft">
+          {bullets.map((b) => (
+            <li key={b}>· {b}</li>
+          ))}
+        </ul>
+        {reason.message ? (
+          <p className="mt-3 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft/60">
+            {reason.message}
+          </p>
+        ) : null}
+        <div className="mt-6 flex gap-2">
+          <Button variant="secondary" size="md" fullWidth onClick={onClose}>
+            다음에
+          </Button>
+          {primaryHref === '#' ? (
+            <Button
+              variant="accent"
+              size="md"
+              fullWidth
+              accentColor={accentColor}
+              onClick={onClose}
+            >
+              {primaryLabel}
+            </Button>
+          ) : (
+            <a
+              href={primaryHref}
+              className="flex h-11 flex-1 items-center justify-center rounded-full px-5 font-sans text-[14px] font-medium text-white transition hover:opacity-90"
+              style={{ background: accentColor }}
+            >
+              {primaryLabel}
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 /**
