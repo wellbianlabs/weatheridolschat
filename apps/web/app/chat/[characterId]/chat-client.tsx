@@ -139,6 +139,12 @@ export default function ChatClient({ character }: { character: Character }) {
   // Per-song AbortControllers so the "취소" button on the music card can
   // stop the polling loop without affecting other in-flight songs.
   const songAbortersRef = useRef<Record<string, AbortController>>({});
+  // Composer input ref — drives the "input always focused" behavior.
+  // Real chat apps (Slack, Discord, ChatGPT) keep the cursor in the
+  // composer at all times so the user can immediately start the next
+  // message instead of having to click back into the field after
+  // every send.
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setNickname(localStorage.getItem('wi.nickname') ?? '친구');
@@ -150,6 +156,20 @@ export default function ChatClient({ character }: { character: Character }) {
   useEffect(() => {
     saveHistory(character.id, messages);
   }, [character.id, messages]);
+
+  // Auto-focus the composer:
+  //   1. On mount — so the user can start typing immediately on entry.
+  //   2. Whenever `sending` transitions back to false — so the cursor
+  //      is back in place the instant a reply finishes streaming,
+  //      ready for the next message. Without this, focus is lost the
+  //      moment the user clicks 보내기 or a shortcut chip and the user
+  //      has to click back into the field every turn.
+  // The `?.focus({ preventScroll: true })` keeps the scroll position
+  // anchored to the messages area (focus normally tries to scroll the
+  // focused element into view, which would yank the chat upward).
+  useEffect(() => {
+    if (!sending) inputRef.current?.focus({ preventScroll: true });
+  }, [sending]);
 
   useEffect(() => {
     let alive = true;
@@ -681,10 +701,19 @@ export default function ChatClient({ character }: { character: Character }) {
             }}
           >
             <input
+              ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="메시지를 입력하세요…"
-              disabled={sending}
+              // Intentionally NOT disabled during `sending`. Standard
+              // chat UX (ChatGPT, Slack, Discord) lets the user keep
+              // typing the next message while the previous one
+              // streams. The form's onSubmit handler and `send()`
+              // both bail when sending is true, so there's no race —
+              // the button just stays disabled until the round-trip
+              // completes.
+              autoFocus
+              autoComplete="off"
               className="h-11 flex-1 rounded-full border border-brand-ink/12 bg-white px-5 font-sans text-[15px] text-brand-ink outline-none transition focus:border-brand-ink/40"
             />
             <button
