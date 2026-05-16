@@ -23,7 +23,14 @@ import { buildPrompt } from '@wi/core/chat';
  *  - Empty-output / safety / quota fallback emits friendly tokens so the
  *    UI never sticks on the loading dots.
  */
+// Walked in order until one returns non-404. Includes both Gemini 2.x
+// (newer keys, 2025+) and 1.5 names (legacy AI Studio keys).
 const MODEL_FALLBACK_CHAIN = [
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-001',
+  'gemini-2.0-flash-lite',
   'gemini-1.5-flash',
   'gemini-1.5-flash-8b',
   'gemini-1.5-pro',
