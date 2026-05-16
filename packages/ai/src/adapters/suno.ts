@@ -51,37 +51,43 @@ export function createSunoAdapter(opts: {
       const styleHint = input.styleHint ?? defaultStyleFor(input.characterId);
       const title = input.title ?? defaultTitleFor(input.characterId);
 
-      // Inspiration mode (customMode=false) — Suno generates the full
-      // lyrics, melody, structure, and even the title from a single
-      // description. The previous customMode=true setup treated our
-      // short server-side `prompt` as the LYRICS to be sung, which is
-      // why the response `prompt` field came back as a 12-word echo
-      // instead of a full song's worth of verses + chorus + bridge.
+      // Two modes, decided by whether the caller pre-generated lyrics:
       //
-      // We compose a rich brief that combines:
-      //   1. The user's free-form request ("오늘 날씨에 어울리는 노래…")
-      //   2. The character's musical identity (bright k-pop / lo-fi /
-      //      bedroom pop / edm trap — per defaultStyleFor)
-      //   3. Concrete weather grounding (condition + temperature) so the
-      //      lyrics feel about *today*, not generic
-      //   4. Hard-coded "Korean female vocal" so we never get an English
-      //      cover.
-      const brief = buildInspirationBrief({
-        characterId: input.characterId,
-        weather: input.weather,
-        userPrompt: input.userPrompt,
-        styleHint,
-      });
-
-      const body = {
-        customMode: false,
-        instrumental: input.instrumental ?? false,
-        prompt: brief,
-        model: 'V4_5',
-        callBackUrl,
-      };
+      //   • customMode = true  (lyrics provided): Suno sings the exact
+      //     text we pass. Used by the 날씨송 flow after Gemini writes
+      //     the lyrics — gives us the dual benefit of "Korean-first,
+      //     English mix OK" enforcement AND instant lyrics in the
+      //     client card while audio renders for the next 30-60s.
+      //
+      //   • customMode = false (inspiration mode): Suno generates the
+      //     lyrics itself from a brief. Fallback for when Gemini is
+      //     unavailable (no key, all models 404, safety block). The
+      //     song still works, just without the read-along during wait.
+      const hasLyrics = !!input.lyrics && input.lyrics.trim().length > 0;
+      const body = hasLyrics
+        ? {
+            customMode: true,
+            instrumental: input.instrumental ?? false,
+            prompt: input.lyrics,
+            style: styleHint,
+            title,
+            model: 'V4_5',
+            callBackUrl,
+          }
+        : {
+            customMode: false,
+            instrumental: input.instrumental ?? false,
+            prompt: buildInspirationBrief({
+              characterId: input.characterId,
+              weather: input.weather,
+              userPrompt: input.userPrompt,
+              styleHint,
+            }),
+            model: 'V4_5',
+            callBackUrl,
+          };
       console.info(
-        `[suno] generate character=${input.characterId} mode=inspiration model=V4_5 briefLen=${brief.length}`,
+        `[suno] generate character=${input.characterId} mode=${hasLyrics ? 'custom-with-lyrics' : 'inspiration'} model=V4_5 ${hasLyrics ? `lyricsLen=${input.lyrics!.length}` : `briefLen=${(body as { prompt: string }).prompt.length}`}`,
       );
 
       const t0 = Date.now();
@@ -125,7 +131,11 @@ export function createSunoAdapter(opts: {
         taskId,
         status: 'queued',
         model: 'suno-v4.5',
-        prompt: brief,
+        // Echo back the lyrics we sent so the client can render them
+        // immediately (the polling response won't include them again
+        // until Suno actually finishes audio rendering).
+        lyrics: hasLyrics ? input.lyrics : undefined,
+        prompt: hasLyrics ? input.lyrics! : (body as { prompt: string }).prompt,
         title,
       };
     },

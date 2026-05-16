@@ -60,10 +60,19 @@ export interface MusicAdapterInput {
   userPrompt: string;
   /** Optional tone/genre seed — e.g. "lo-fi piano", "k-pop summer pop". */
   styleHint?: string;
-  /** Whether to also generate lyrics ("custom mode"). */
+  /** True = instrumental track, no vocal lyrics. */
   instrumental?: boolean;
   /** Track title shown to the user. */
   title?: string;
+  /**
+   * Pre-generated lyrics. When provided, the adapter uses Suno's custom
+   * mode (singing the supplied text). When omitted, the adapter falls
+   * back to inspiration mode (Suno writes its own lyrics from a brief).
+   *
+   * For the 날씨송 flow we generate these via Gemini first so the
+   * client can render the lyrics card during the 30–60s music wait.
+   */
+  lyrics?: string;
 }
 
 export interface MusicAdapterResult {

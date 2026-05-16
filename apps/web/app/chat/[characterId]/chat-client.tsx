@@ -907,16 +907,14 @@ function WeatherSongCard({
           {subtitle}
         </div>
 
+        {/* Player / progress / error — the audio-bearing top of the body */}
         {track.status === 'done' && track.audioUrl ? (
-          <div className="space-y-3 pt-1">
-            <AudioPlayer
-              src={track.audioUrl}
-              accent={accent}
-              downloadHref={downloadHref}
-              downloadName={`${downloadName}.mp3`}
-            />
-            {track.lyrics ? <LyricsView lyrics={track.lyrics} accent={accent} /> : null}
-          </div>
+          <AudioPlayer
+            src={track.audioUrl}
+            accent={accent}
+            downloadHref={downloadHref}
+            downloadName={`${downloadName}.mp3`}
+          />
         ) : track.status === 'failed' ? (
           <p className="font-sans text-[13px] leading-relaxed text-brand-ink-soft">
             노래를 만들지 못했어. {track.error ? `(${track.error})` : ''}
@@ -931,6 +929,11 @@ function WeatherSongCard({
             onCancel={onCancel}
           />
         )}
+
+        {/* Lyrics — render whenever we have them, regardless of audio
+            state. Gemini pre-generates them before Suno starts so the
+            user can read along during the 30-60s music wait. */}
+        {track.lyrics ? <LyricsView lyrics={track.lyrics} accent={accent} /> : null}
       </div>
     </div>
   );
