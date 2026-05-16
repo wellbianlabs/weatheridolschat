@@ -40,28 +40,75 @@ interface VoiceConfig {
 /**
  * Per-character voice presets.
  *
- * Korea's Neural2 voices on Google Cloud TTS:
- *   ko-KR-Neural2-A  female, warm/bright (default voice)
- *   ko-KR-Neural2-B  female, cooler/softer
- *   ko-KR-Neural2-C  male, lower (we don't use it directly — all our
- *                                  characters are female — but it's
- *                                  available if we add a male role)
+ * Upgraded from Neural2 to **Chirp3-HD** — Google's newest generative
+ * TTS family. The difference is night-and-day for "mechanical" feel:
+ * Neural2 reads each sentence with consistent prosody, while Chirp3-HD
+ * uses a generative model that actually *acts* the text — natural
+ * breath, emphasis on the right syllables, mood-matched timbre.
  *
- * Pitch/rate adjustments push each voice into a distinct emotional
- * register so the user can tell who's "speaking" even with eyes closed.
+ * Available Korean Chirp3-HD voices (all female-presenting timbres
+ * we use; Charon/Puck/Fenrir are masculine and unused here):
+ *   ko-KR-Chirp3-HD-Aoede   — warm, slightly melancholic
+ *   ko-KR-Chirp3-HD-Kore    — calm, dreamy, soft pace
+ *   ko-KR-Chirp3-HD-Leda    — bright, friendly, upbeat
+ *   ko-KR-Chirp3-HD-Zephyr  — energetic, sharp, confident
+ *
+ * Note: Chirp3-HD voices IGNORE the `pitch` audioConfig parameter
+ * (the model bakes pitch in based on the voice + content). We keep
+ * pitch in the type for back-compat with manual overrides but the
+ * route below only forwards it when the voice is a Neural2/Wavenet
+ * one that actually supports it.
  */
 const VOICE_PRESETS: Record<CharacterId, VoiceConfig> = {
-  sunny: { voice: 'ko-KR-Neural2-A', rate: 1.05, pitch: 1.5 },
-  rain: { voice: 'ko-KR-Neural2-B', rate: 0.92, pitch: -1.5 },
-  cloudy: { voice: 'ko-KR-Neural2-B', rate: 0.98, pitch: 0.5 },
-  thunder: { voice: 'ko-KR-Neural2-A', rate: 1.1, pitch: -2.5 },
+  // Bright honey-blonde idol → bright/friendly Leda
+  sunny: { voice: 'ko-KR-Chirp3-HD-Leda', rate: 1.0, pitch: 0 },
+  // Introspective lo-fi mood → warm/melancholic Aoede, slower
+  rain: { voice: 'ko-KR-Chirp3-HD-Aoede', rate: 0.94, pitch: 0 },
+  // Dreamy daydream artist → calm/soft Kore
+  cloudy: { voice: 'ko-KR-Chirp3-HD-Kore', rate: 0.97, pitch: 0 },
+  // Confident rebellious rapper → energetic/sharp Zephyr, faster
+  thunder: { voice: 'ko-KR-Chirp3-HD-Zephyr', rate: 1.06, pitch: 0 },
 };
 
 const DEFAULT_VOICE: VoiceConfig = {
-  voice: 'ko-KR-Neural2-A',
+  voice: 'ko-KR-Chirp3-HD-Aoede',
   rate: 1.0,
   pitch: 0.0,
 };
+
+/** True for voices that accept the legacy `pitch` audioConfig field.
+ *  Chirp3-HD ignores it; Neural2/Wavenet/Standard do not. */
+function supportsPitch(voiceName: string): boolean {
+  return !/^ko-KR-Chirp/i.test(voiceName);
+}
+
+/** Map a Chirp3-HD voice name to the closest Neural2 fallback so the
+ *  retry sounds similar in timbre. The mapping is rough — we just
+ *  bucket by "brighter" (Leda/Zephyr → Neural2-A) vs "warmer"
+ *  (Aoede/Kore → Neural2-B). */
+function chirpToNeural2(chirpName: string): string {
+  if (/Leda|Zephyr/i.test(chirpName)) return 'ko-KR-Neural2-A';
+  return 'ko-KR-Neural2-B';
+}
+
+/** Convert raw text into mild SSML with natural breath pauses at
+ *  sentence ends and Korean clause boundaries. Keeps the markup
+ *  conservative so Chirp3-HD doesn't override its own prosody. */
+function textToSsml(text: string): string {
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+  const withBreaks = escaped
+    // Strong pause at sentence terminators
+    .replace(/([.!?…])\s+/g, '$1<break time="350ms"/> ')
+    // Soft pause at Korean commas/semis
+    .replace(/([,;])\s+/g, '$1<break time="180ms"/> ')
+    // Tiny pause around Korean conjunction openers ("그래서", "근데", "음")
+    .replace(/(^|[.!?]\s*)(음|아|어|그래서|근데|그런데|있잖아)([\s,])/g, '$1$2<break time="120ms"/>$3');
+  return `<speak>${withBreaks}</speak>`;
+}
 
 const MAX_CHARS = 4500; // Google TTS rejects > 5000 chars; leave headroom.
 
@@ -92,8 +139,29 @@ export async function POST(req: Request): Promise<Response> {
   const rate = clamp(body.rate ?? preset.rate, 0.25, 4.0);
   const pitch = clamp(body.pitch ?? preset.pitch, -20.0, 20.0);
 
+  // Chirp3-HD gives the most natural delivery when the input is SSML
+  // with light pause hints — the model treats the markup as a
+  // performance cue. For Neural2 / Wavenet we still feed plain text
+  // (they handle their own punctuation prosody).
+  const isChirp3 = /^ko-KR-Chirp/i.test(voice);
+  const ssml = isChirp3 ? textToSsml(text) : null;
+
+  // Build the audioConfig dynamically: only include `pitch` for
+  // voice families that accept it. Chirp3-HD returns 400 on
+  // unsupported fields when strict mode is enabled.
+  const audioConfig: Record<string, unknown> = {
+    audioEncoding: 'MP3',
+    speakingRate: rate,
+    volumeGainDb: 1.5,
+    // Mastering profile tuned for the most common playback target.
+    // 'headphone-class-device' produces the warmest mids, which
+    // suits idol-character TTS better than the default flat output.
+    effectsProfileId: ['headphone-class-device'],
+  };
+  if (supportsPitch(voice)) audioConfig.pitch = pitch;
+
   console.info(
-    `[tts] start character=${body.characterId ?? '-'} voice=${voice} rate=${rate} pitch=${pitch} chars=${text.length}`,
+    `[tts] start character=${body.characterId ?? '-'} voice=${voice} rate=${rate} pitch=${supportsPitch(voice) ? pitch : 'n/a'} ssml=${!!ssml} chars=${text.length}`,
   );
 
   const t0 = Date.now();
@@ -105,17 +173,9 @@ export async function POST(req: Request): Promise<Response> {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          input: { text },
+          input: ssml ? { ssml } : { text },
           voice: { languageCode: 'ko-KR', name: voice },
-          audioConfig: {
-            audioEncoding: 'MP3',
-            speakingRate: rate,
-            pitch,
-            // Slight loudness boost so character voices match the
-            // perceived volume of native iOS/Android TTS without
-            // distorting.
-            volumeGainDb: 1.5,
-          },
+          audioConfig,
         }),
       },
     );
@@ -125,7 +185,58 @@ export async function POST(req: Request): Promise<Response> {
   }
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    console.error(`[tts] HTTP ${res.status} ${body.slice(0, 300)}`);
+    console.error(`[tts] HTTP ${res.status} voice=${voice} ${body.slice(0, 300)}`);
+
+    // Chirp3-HD voices haven't rolled out to every region yet. If the
+    // primary call 400/404s on a Chirp3 voice, retry once with the
+    // closest Neural2 equivalent so the user still gets audio — just
+    // a touch more synthetic. We swallow the second failure into the
+    // user-facing error so they see "TTS failed" not two stack traces.
+    if (isChirp3 && (res.status === 400 || res.status === 404)) {
+      const fallback = chirpToNeural2(voice);
+      console.warn(`[tts] Chirp3-HD unavailable, retrying with ${fallback}`);
+      try {
+        const retryAudio: Record<string, unknown> = {
+          audioEncoding: 'MP3',
+          speakingRate: rate,
+          volumeGainDb: 1.5,
+          effectsProfileId: ['headphone-class-device'],
+          pitch, // Neural2 accepts pitch
+        };
+        const retryRes = await fetch(
+          `https://texttospeech.googleapis.com/v1/text:synthesize?key=${encodeURIComponent(apiKey)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              input: { text },
+              voice: { languageCode: 'ko-KR', name: fallback },
+              audioConfig: retryAudio,
+            }),
+          },
+        );
+        if (retryRes.ok) {
+          const j = (await retryRes.json()) as { audioContent?: string };
+          if (j.audioContent) {
+            const mp3 = Buffer.from(j.audioContent, 'base64');
+            console.info(`[tts] OK (fallback Neural2) bytes=${mp3.length}`);
+            return new Response(mp3, {
+              status: 200,
+              headers: {
+                'Content-Type': 'audio/mpeg',
+                'Content-Length': String(mp3.length),
+                'X-TTS-Voice': fallback,
+                'X-TTS-Provider': 'google-cloud-fallback',
+                'Cache-Control': 'private, max-age=3600',
+              },
+            });
+          }
+        }
+      } catch (err) {
+        console.error(`[tts] fallback also failed: ${(err as Error).message}`);
+      }
+    }
+
     return jsonError(
       'upstream_error',
       `Google TTS HTTP ${res.status}: ${body.slice(0, 200)}`,
