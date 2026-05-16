@@ -126,21 +126,48 @@ export async function generateWeatherSongLyrics(opts: {
         generationConfig: {
           temperature: 0.9,
           topP: 0.95,
-          maxOutputTokens: 2048,
+          // 8192 is the per-call max for the Gemini 2.x family. We need
+          // plenty of headroom because the previous 2048 cap was being
+          // hit mid-Chorus on full song lyrics (~22-28 lines × Korean
+          // tokens-per-char ratio + section markers + occasional English
+          // words). Truncated output came back like "[Chorus]\n이"
+          // with finishReason=MAX_TOKENS — the caller couldn't tell that
+          // wasn't a complete song.
+          maxOutputTokens: 8192,
         },
         safetySettings: SAFETY,
       });
       const result = await model.generateContent(prompt);
+      const candidate = result.response.candidates?.[0];
+      const finishReason = candidate?.finishReason;
       const text = result.response.text() ?? '';
       if (!text.trim()) {
-        console.warn(`[lyrics] empty response model=${modelId}`);
-        lastErr = new Error(`Gemini ${modelId} returned empty text`);
+        console.warn(`[lyrics] empty response model=${modelId} finish=${finishReason ?? '?'}`);
+        lastErr = new Error(`Gemini ${modelId} returned empty text (finish=${finishReason})`);
         continue;
       }
       const parsed = parseLyricsResponse(text);
+      const validation = validateLyrics(parsed.lyrics);
       console.info(
-        `[lyrics] OK model=${modelId} ms=${Date.now() - t0} chars=${parsed.lyrics.length} title="${parsed.title}"`,
+        `[lyrics] candidate model=${modelId} ms=${Date.now() - t0} finish=${finishReason ?? '?'} chars=${parsed.lyrics.length} lines=${validation.lineCount} sections=${validation.sectionCount} title="${parsed.title}"`,
       );
+
+      // Reject anything that looks like it got cut off (MAX_TOKENS) or
+      // came back unreasonably short for a full song. Treat as "model
+      // failure" so the loop tries the next entry in the fallback chain
+      // instead of returning a truncated stub the UI would render as a
+      // half-song.
+      if (finishReason === 'MAX_TOKENS' || !validation.ok) {
+        const why =
+          finishReason === 'MAX_TOKENS'
+            ? `finishReason=MAX_TOKENS — output cut off at ${parsed.lyrics.length} chars`
+            : `too short (${validation.lineCount} lines, ${validation.sectionCount} sections; need ≥${MIN_LINES} lines and ≥${MIN_SECTIONS} sections)`;
+        console.warn(`[lyrics] reject model=${modelId} reason=${why}`);
+        lastErr = new Error(`Gemini ${modelId} ${why}`);
+        continue;
+      }
+
+      console.info(`[lyrics] OK model=${modelId} accepted`);
       return { ...parsed, model: modelId };
     } catch (err) {
       lastErr = err as Error;
@@ -155,6 +182,36 @@ export async function generateWeatherSongLyrics(opts: {
   throw new Error(
     `Lyrics generation failed: ${lastErr?.message ?? 'all Gemini models exhausted'}`,
   );
+}
+
+// Minimum acceptable shape for a generated song. Tuned against the
+// prompt's "22~28줄 / 6 sections" requirement with some slack so the
+// occasional well-formed song that's slightly shorter still passes.
+const MIN_LINES = 12;
+const MIN_SECTIONS = 3;
+
+function validateLyrics(lyrics: string): {
+  ok: boolean;
+  lineCount: number;
+  sectionCount: number;
+} {
+  // Count substantive (non-empty, non-section-header) lines so we don't
+  // count the [Verse 1] markers themselves as content.
+  const lines = lyrics.split(/\r?\n/);
+  let lineCount = 0;
+  let sectionCount = 0;
+  const SECTION = /^\s*\[(.+?)\]\s*$/;
+  for (const raw of lines) {
+    const t = raw.trim();
+    if (!t) continue;
+    if (SECTION.test(t)) sectionCount += 1;
+    else lineCount += 1;
+  }
+  return {
+    ok: lineCount >= MIN_LINES && sectionCount >= MIN_SECTIONS,
+    lineCount,
+    sectionCount,
+  };
 }
 
 function buildPrompt(opts: {
@@ -178,20 +235,21 @@ ${userLine}
 
 요구사항:
 - 한국어를 메인으로 쓰되, K-pop처럼 영어 단어/구절을 자연스럽게 섞는 건 OK ("oh my", "baby", "shine", "tonight" 같은 것). 한 줄을 통째로 영어로만 쓰지는 마라.
-- 구조 정확히 지키기:
+- **반드시** 아래 6개 섹션을 모두 작성하고, 각 섹션을 끝까지 완결해라. 중간에 멈추지 마라.
     [Verse 1] (4줄)
     [Chorus] (4~5줄, 후렴구는 임팩트 있게)
     [Verse 2] (4줄)
-    [Chorus] (위와 동일하거나 살짝 변주)
+    [Chorus] (위와 동일하거나 살짝 변주, 줄 수 동일)
     [Bridge] (3~4줄)
     [Outro] (2~3줄)
-- 전체 22~28줄.
+- 전체 콘텐츠 라인 수: **최소 22줄, 최대 28줄** (섹션 헤더 제외, 실제 가사 줄만 카운트).
+- 마지막 [Outro] 섹션의 마지막 줄까지 반드시 완성한 후에 응답을 끝내라.
 - 오늘 날씨를 *구체적인 디테일*로 묘사해라 (하늘 색, 빛, 소리, 공기 온도, 사람이 그 안에서 뭘 할까). 추상적 비유로만 채우지 말 것.
 - 1인칭 화자가 청자 한 명에게 보내는 사적인 노래처럼.
 - 캐릭터의 페르소나 톤이 가사에 묻어나야 한다 (밝음 / 잔잔함 / 몽환 / 자신감 — 위 페르소나 설명 따라).
 
 출력 형식:
-첫 줄에 [Title: 곡 제목] 한 줄로 시작하고, 빈 줄 한 칸 후 가사를 [Verse 1]부터 [Outro]까지 적어라. 그게 전부. 마크다운, 설명, 번역, 코드블록 금지.`;
+첫 줄에 [Title: 곡 제목] 한 줄로 시작하고, 빈 줄 한 칸 후 가사를 [Verse 1]부터 [Outro]까지 적어라. 그게 전부. 마크다운, 설명, 번역, 코드블록 금지. 전체 6개 섹션 모두 완성된 상태로 끝낼 것.`;
 }
 
 /**
