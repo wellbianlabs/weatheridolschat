@@ -177,8 +177,19 @@ export async function POST(req: Request): Promise<Response> {
         // regardless of which chat adapter (Mock / Gemini / Claude) ran —
         // we always classify the message server-side so live models also
         // get the right follow-up: selfie image, song, or product card.
+        //
+        // IMPORTANT: when the user attached a photo, suppress the
+        // "request_image" (selfie generation) intent. The classifier
+        // sees keywords like "사진" or "보여줘" in the user's text and
+        // would otherwise mistake the photo-analysis flow for a
+        // selfie-generation request — leading to Claude correctly
+        // analysing the picture AND THEN OpenAI generating an
+        // unrelated selfie that takes over the conversation. When the
+        // user sends a picture they're SHOWING us one, not asking for
+        // one. Song / product intents still apply because they're
+        // orthogonal to the image direction.
         const intent = classifyIntent(text);
-        if (intent === 'image_request') {
+        if (intent === 'image_request' && !userImage) {
           send({ type: 'tool', name: 'request_image', output: { intent: 'selfie' } });
         } else if (intent === 'song_request') {
           send({ type: 'tool', name: 'request_song', output: {} });
