@@ -22,7 +22,12 @@ interface UIMessage {
   pending?: boolean;
 }
 
-const MAX_FREE_MESSAGES = 30;
+/**
+ * Per-day message cap. `Infinity` = no limit (current behavior). The
+ * counter + paywall UI is kept wired up so we can re-enable a quota
+ * (e.g. 30) for monetisation later by flipping this single number.
+ */
+const MAX_FREE_MESSAGES = Number.POSITIVE_INFINITY;
 
 const WEATHER_LABEL: Record<string, string> = {
   clear: '맑음',
@@ -342,7 +347,7 @@ export default function ChatClient({ character }: { character: Character }) {
               </span>
             </div>
             <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
-              {usage}/{MAX_FREE_MESSAGES}
+              {Number.isFinite(MAX_FREE_MESSAGES) ? `${usage}/${MAX_FREE_MESSAGES}` : `오늘 ${usage}회`}
             </span>
           </div>
           <div className="border-t border-brand-ink/8 bg-brand-paper/50 px-6 py-1.5">
