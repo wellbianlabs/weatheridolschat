@@ -13,6 +13,20 @@ export interface ChatAdapterInput {
   userMessage: string;
   ids: { userMessageId: string; assistantMessageId: string };
   memorySummary?: string;
+  /**
+   * Optional image attached to the user's turn. Used for the
+   * "send a photo" flow — the chat client captures via camera or
+   * file input, base64-encodes the bytes, and ships them through
+   * /api/chat. Real adapters (Claude, Gemini) pass it as a vision
+   * content block; the Mock adapter just acknowledges that an
+   * image was attached.
+   */
+  userImage?: {
+    /** "image/jpeg" | "image/png" | "image/webp" */
+    mediaType: string;
+    /** Raw base64 (no `data:` prefix). */
+    base64: string;
+  };
 }
 
 export interface ChatAdapter {

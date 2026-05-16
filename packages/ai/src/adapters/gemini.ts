@@ -87,10 +87,25 @@ export function createGeminiAdapter(apiKey: string): ChatAdapter {
           role: m.role === 'assistant' ? 'model' : 'user',
           parts: [{ text: m.content }],
         }));
-      const contents = [
-        ...history,
-        { role: 'user', parts: [{ text: input.userMessage }] },
-      ];
+
+      // Build the current user turn. Gemini's `parts` array accepts a
+      // mix of text and inlineData (base64 image) entries — putting
+      // the image first matches the convention used in Google's
+      // multimodal examples.
+      const currentParts: Array<
+        { text: string } | { inlineData: { mimeType: string; data: string } }
+      > = [];
+      if (input.userImage) {
+        currentParts.push({
+          inlineData: {
+            mimeType: input.userImage.mediaType,
+            data: input.userImage.base64,
+          },
+        });
+      }
+      currentParts.push({ text: input.userMessage });
+
+      const contents = [...history, { role: 'user', parts: currentParts }];
 
       // Decide model order this call: cached first if we have one.
       const order = cachedWorkingModelId

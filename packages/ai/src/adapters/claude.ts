@@ -27,18 +27,60 @@ export function createClaudeAdapter(apiKey: string): ChatAdapter {
       });
 
       const systemMsg = llmMessages.find((m) => m.role === 'system')?.content ?? '';
-      const conversation = llmMessages
+      type AnthroMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+      type AnthroBlock =
+        | { type: 'text'; text: string }
+        | {
+            type: 'image';
+            source: { type: 'base64'; media_type: AnthroMediaType; data: string };
+          };
+      type AnthroMessage = {
+        role: 'assistant' | 'user';
+        content: string | AnthroBlock[];
+      };
+      const conversation: AnthroMessage[] = llmMessages
         .filter((m) => m.role !== 'system')
         .map((m) => ({
           role: (m.role === 'assistant' ? 'assistant' : 'user') as 'assistant' | 'user',
           content: m.content,
         }));
 
-      // Append the current user turn if not already in history.
-      const lastTurn = conversation[conversation.length - 1];
-      if (!lastTurn || lastTurn.role !== 'user' || lastTurn.content !== input.userMessage) {
-        conversation.push({ role: 'user', content: input.userMessage });
+      // Build the current user turn — image content block prepended
+      // when a photo was attached, so Claude's vision pass runs *with*
+      // the text question as context. Order matters: per Anthropic
+      // docs the image must come BEFORE the question for best results.
+      const userContent: AnthroBlock[] = [];
+      if (input.userImage) {
+        const mt = input.userImage.mediaType.toLowerCase();
+        const allowed: ReadonlyArray<AnthroMediaType> = [
+          'image/jpeg',
+          'image/png',
+          'image/gif',
+          'image/webp',
+        ];
+        const safeMt = (allowed.find((a) => a === mt) ?? 'image/jpeg') as AnthroMediaType;
+        userContent.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: safeMt,
+            data: input.userImage.base64,
+          },
+        });
       }
+      userContent.push({ type: 'text', text: input.userMessage });
+
+      // Replace any duplicate trailing user turn so we don't echo the
+      // text twice when vision is attached.
+      const lastTurn = conversation[conversation.length - 1];
+      if (lastTurn && lastTurn.role === 'user') conversation.pop();
+      conversation.push({
+        role: 'user',
+        content:
+          userContent.length === 1 && userContent[0]!.type === 'text'
+            ? input.userMessage
+            : userContent,
+      });
 
       yield {
         type: 'meta',

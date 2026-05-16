@@ -11,6 +11,31 @@ import { Button, Chip, Eyebrow } from '@wi/ui/web';
 
 import WeatherBackground from '@/components/WeatherBackground';
 
+/**
+ * Minimal subset of the Web Speech API surface we use. The actual
+ * types live in `lib.dom.d.ts` but vary between Chrome's prefixed
+ * variant (`webkitSpeechRecognition`) and the standard one — we type
+ * just the bits we touch so we don't have to fight TS over vendor
+ * differences.
+ */
+interface SpeechRecognitionLike {
+  lang: string;
+  interimResults: boolean;
+  continuous: boolean;
+  start(): void;
+  stop(): void;
+  abort(): void;
+  onresult: ((e: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((e: { error?: string }) => void) | null;
+  onend: (() => void) | null;
+}
+interface SpeechRecognitionEventLike {
+  results: ArrayLike<{
+    isFinal?: boolean;
+    0: { transcript: string };
+  }>;
+}
+
 type MessageKind = 'text' | 'image' | 'product' | 'music';
 interface MusicTrack {
   taskId: string;
@@ -48,6 +73,13 @@ interface UIMessage {
   product?: ProductPayload;
   music?: MusicTrack;
   pending?: boolean;
+  /** Object URL of a Google TTS-rendered MP3, cached on first 🔊 click.
+   *  Reused for replay + download so we don't re-bill the API. */
+  ttsUrl?: string;
+  /** True while /api/tts is in flight for this message. */
+  ttsLoading?: boolean;
+  /** Last TTS error text, if any. */
+  ttsError?: string;
 }
 
 /**
@@ -83,6 +115,42 @@ function storageKey(characterId: string) {
 function truncate(s: string | undefined, n: number): string {
   if (!s) return 'unknown';
   return s.length <= n ? s : s.slice(0, n - 1) + '…';
+}
+
+/**
+ * Downscale + recompress an image File to a JPEG data URL that fits
+ * comfortably under the server's 6MB upload cap. Maintains aspect
+ * ratio; max dimension `maxEdge`; output quality `quality` (0..1).
+ */
+async function downscaleImageToDataUrl(
+  file: File,
+  maxEdge: number,
+  quality: number,
+): Promise<string> {
+  const bitmap = await createImageBitmap(file);
+  const ratio = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height));
+  const w = Math.round(bitmap.width * ratio);
+  const h = Math.round(bitmap.height * ratio);
+  const canvas =
+    typeof OffscreenCanvas !== 'undefined'
+      ? new OffscreenCanvas(w, h)
+      : Object.assign(document.createElement('canvas'), { width: w, height: h });
+  const ctx = canvas.getContext('2d') as
+    | CanvasRenderingContext2D
+    | OffscreenCanvasRenderingContext2D
+    | null;
+  if (!ctx) throw new Error('canvas 2d context unavailable');
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  if (canvas instanceof OffscreenCanvas) {
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+    return await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error('FileReader fail'));
+      reader.readAsDataURL(blob);
+    });
+  }
+  return (canvas as HTMLCanvasElement).toDataURL('image/jpeg', quality);
 }
 function getTodayCount(): number {
   if (typeof window === 'undefined') return 0;
@@ -131,6 +199,14 @@ export default function ChatClient({ character }: { character: Character }) {
   ]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  // Pending image to send with the next message (from camera/file picker).
+  // Held as a data URL so we can both preview it locally and ship it
+  // through /api/chat without any extra encoding step.
+  const [pendingImage, setPendingImage] = useState<string | null>(null);
+  // Web Speech API recognition state — see startListening / stopListening.
+  const [listening, setListening] = useState(false);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [weather, setWeather] = useState<WeatherSnapshot | null>(null);
   const [paywallOpen, setPaywallOpen] = useState(false);
   const [usage, setUsage] = useState(0);
@@ -156,6 +232,22 @@ export default function ChatClient({ character }: { character: Character }) {
   useEffect(() => {
     saveHistory(character.id, messages);
   }, [character.id, messages]);
+
+  // Revoke any blob URLs we created for TTS playback when the page
+  // unmounts, so the browser doesn't keep audio buffers in memory
+  // after the user leaves the chat.
+  useEffect(() => {
+    return () => {
+      for (const m of messages) {
+        if (m.ttsUrl) URL.revokeObjectURL(m.ttsUrl);
+      }
+      // Also stop any active speech recognition on unmount.
+      recognitionRef.current?.abort();
+    };
+    // Intentionally not depending on `messages` — we want this to run
+    // ONCE on unmount with the messages snapshot from the last render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Auto-focus the composer:
   //   1. On mount — so the user can start typing immediately on entry.
@@ -187,6 +279,134 @@ export default function ChatClient({ character }: { character: Character }) {
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages]);
+
+  // ── Voice input (Web Speech API) ─────────────────────────────────
+  // The browser-native SpeechRecognition delegates to whatever the OS
+  // provides (on Chrome/Edge it routes through Google's servers; on
+  // Safari it uses Apple's). We append the live transcript to the
+  // input field as the user speaks so they can keep their eyes on
+  // the screen and edit by typing right after.
+  function startListening() {
+    if (listening) return;
+    if (typeof window === 'undefined') return;
+    const Ctor =
+      (window as unknown as { SpeechRecognition?: new () => SpeechRecognitionLike })
+        .SpeechRecognition ??
+      (window as unknown as { webkitSpeechRecognition?: new () => SpeechRecognitionLike })
+        .webkitSpeechRecognition;
+    if (!Ctor) {
+      setInput((prev) => prev + (prev ? ' ' : '') + '(브라우저가 음성 입력을 지원하지 않아요)');
+      return;
+    }
+    const rec = new Ctor();
+    rec.lang = 'ko-KR';
+    rec.interimResults = true;
+    rec.continuous = false;
+    let finalTranscript = '';
+    rec.onresult = (e) => {
+      let interim = '';
+      for (let i = 0; i < e.results.length; i += 1) {
+        const piece = e.results[i]!;
+        const text = piece[0].transcript;
+        if (piece.isFinal) finalTranscript += text;
+        else interim += text;
+      }
+      // Show interim transcript live; once final, commit it into the field.
+      setInput((prev) => {
+        // Strip any previous interim suffix (we tag interim with a marker
+        // so we don't keep stacking partial transcripts).
+        const base = prev.replace(/\s?⟨[^⟩]*⟩\s?$/, '');
+        if (interim) return `${base}${base ? ' ' : ''}⟨${interim}⟩`;
+        if (finalTranscript) return `${base}${base ? ' ' : ''}${finalTranscript.trim()}`;
+        return base;
+      });
+    };
+    rec.onerror = (e) => {
+      console.warn('[voice] err', e?.error);
+      setListening(false);
+    };
+    rec.onend = () => {
+      // Clean any leftover interim marker.
+      setInput((prev) => prev.replace(/\s?⟨[^⟩]*⟩\s?$/, '').trim());
+      setListening(false);
+      recognitionRef.current = null;
+    };
+    try {
+      rec.start();
+      recognitionRef.current = rec;
+      setListening(true);
+    } catch (err) {
+      console.warn('[voice] start fail', (err as Error).message);
+    }
+  }
+
+  function stopListening() {
+    recognitionRef.current?.stop();
+    setListening(false);
+  }
+
+  // ── Camera / file picker → preview pending image ─────────────────
+  // We use a hidden <input type="file" capture="environment"> rather
+  // than getUserMedia so mobile gets the system camera UI for free
+  // (and desktop gets the standard file picker). The selected file
+  // is downscaled client-side to keep payloads under our 6MB cap.
+  async function handleImageFile(file: File) {
+    if (!file.type.startsWith('image/')) return;
+    try {
+      const dataUrl = await downscaleImageToDataUrl(file, 1280, 0.85);
+      setPendingImage(dataUrl);
+    } catch (err) {
+      console.warn('[camera] downscale fail', (err as Error).message);
+      // Fallback: raw read (will likely fail server-side validation if
+      // > 6MB, but better than nothing).
+      const reader = new FileReader();
+      reader.onload = () => setPendingImage(reader.result as string);
+      reader.readAsDataURL(file);
+    }
+  }
+
+  // ── TTS playback / download per assistant message ────────────────
+  async function playTts(messageId: string) {
+    const msg = messages.find((m) => m.id === messageId);
+    if (!msg || !msg.content) return;
+    // Reuse cached blob URL if already fetched once.
+    if (msg.ttsUrl) {
+      const audio = new Audio(msg.ttsUrl);
+      void audio.play();
+      return;
+    }
+    setMessages((prev) =>
+      prev.map((m) => (m.id === messageId ? { ...m, ttsLoading: true, ttsError: undefined } : m)),
+    );
+    try {
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: msg.content, characterId: character.id }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as {
+          error?: { message?: string };
+        };
+        throw new Error(data.error?.message ?? `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      setMessages((prev) =>
+        prev.map((m) => (m.id === messageId ? { ...m, ttsUrl: url, ttsLoading: false } : m)),
+      );
+      const audio = new Audio(url);
+      void audio.play();
+    } catch (err) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId
+            ? { ...m, ttsLoading: false, ttsError: truncate((err as Error).message, 140) }
+            : m,
+        ),
+      );
+    }
+  }
 
   /** Cancel an in-flight song generation (user pressed 취소 on the card). */
   function cancelSong(songId: string) {
@@ -382,20 +602,39 @@ export default function ChatClient({ character }: { character: Character }) {
   }
 
   async function send(text: string) {
-    if (!text || sending) return;
+    // Allow empty text when a photo is queued — the chat route fills
+    // in "이 사진 어때?" server-side so the LLM gets a real prompt.
+    if (sending) return;
+    if (!text && !pendingImage) return;
     if (getTodayCount() >= MAX_FREE_MESSAGES) {
       setPaywallOpen(true);
       return;
     }
+    // Snapshot then clear UI state — the image is sent as part of
+    // this turn and must not stick around for the next message.
+    const attachedImage = pendingImage;
     setInput('');
+    setPendingImage(null);
     setSending(true);
     lastUserMessageRef.current = text;
 
     const userId = crypto.randomUUID();
     const assistantId = crypto.randomUUID();
+    // Show the attached image as the user's bubble alongside their
+    // text so the chat record visually matches what the LLM saw.
     setMessages((prev) => [
       ...prev,
-      { id: userId, role: 'user', kind: 'text', content: text },
+      ...(attachedImage
+        ? [
+            {
+              id: crypto.randomUUID(),
+              role: 'user' as const,
+              kind: 'image' as const,
+              imageUrl: attachedImage,
+            },
+          ]
+        : []),
+      { id: userId, role: 'user', kind: 'text', content: text || '(사진을 보냈어)' },
       { id: assistantId, role: 'assistant', kind: 'text', content: '', pending: true },
     ]);
 
@@ -407,7 +646,12 @@ export default function ChatClient({ character }: { character: Character }) {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ characterId: character.id, text, nickname }),
+        body: JSON.stringify({
+          characterId: character.id,
+          text,
+          nickname,
+          imageDataUrl: attachedImage ?? undefined,
+        }),
       });
       if (!res.body) throw new Error('no_body');
       const reader = res.body.getReader();
@@ -671,6 +915,7 @@ export default function ChatClient({ character }: { character: Character }) {
                   message={m}
                   accentColor={character.accentColor}
                   onRegenerate={handleRegenerate}
+                  onPlayTts={playTts}
                 />
               )}
             </div>
@@ -693,6 +938,30 @@ export default function ChatClient({ character }: { character: Character }) {
             ))}
           </div>
 
+          {/* Pending image preview — appears above the input row while
+              the user has a queued photo. Tap × to drop it. */}
+          {pendingImage ? (
+            <div className="flex items-center gap-2 px-6 pt-2">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={pendingImage}
+                alt="첨부 사진 미리보기"
+                className="h-14 w-14 rounded-lg object-cover ring-1 ring-brand-ink/10"
+              />
+              <span className="flex-1 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
+                사진이 함께 전송돼요
+              </span>
+              <button
+                type="button"
+                onClick={() => setPendingImage(null)}
+                aria-label="사진 제거"
+                className="rounded-full px-2 py-1 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
+              >
+                × 제거
+              </button>
+            </div>
+          ) : null}
+
           <form
             className="flex items-center gap-2 px-6 py-3"
             onSubmit={(e) => {
@@ -700,25 +969,92 @@ export default function ChatClient({ character }: { character: Character }) {
               void send(input.trim());
             }}
           >
+            {/* Hidden file input — the 📷 button triggers it. `capture`
+                hints mobile browsers to open the camera; desktop just
+                gets the standard file picker. */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void handleImageFile(f);
+                e.target.value = ''; // allow picking the same file twice in a row
+              }}
+            />
+
+            {/* Camera button */}
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              aria-label="카메라로 사진 첨부"
+              title="카메라 / 갤러리로 사진 첨부 (Claude Vision)"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-brand-ink/12 bg-white text-brand-ink-soft transition hover:border-brand-ink/30 hover:text-brand-ink"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path
+                  d="M4 8h3l2-2h6l2 2h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1Z"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinejoin="round"
+                />
+                <circle cx="12" cy="13" r="3.5" stroke="currentColor" strokeWidth="1.6" />
+              </svg>
+            </button>
+
+            {/* Voice input button — toggles SpeechRecognition. Pulses red
+                while listening so the user can tell mic is hot. */}
+            <button
+              type="button"
+              onClick={() => (listening ? stopListening() : startListening())}
+              aria-label={listening ? '음성 입력 중지' : '음성으로 입력'}
+              aria-pressed={listening}
+              title={listening ? '음성 입력 중… 다시 클릭하면 중지' : '음성으로 입력 (한국어)'}
+              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-full border transition ${
+                listening
+                  ? 'border-red-400/60 bg-red-50 text-red-500 animate-pulse'
+                  : 'border-brand-ink/12 bg-white text-brand-ink-soft hover:border-brand-ink/30 hover:text-brand-ink'
+              }`}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <rect
+                  x="9"
+                  y="3"
+                  width="6"
+                  height="11"
+                  rx="3"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                />
+                <path
+                  d="M5 11a7 7 0 0 0 14 0M12 18v3"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                />
+              </svg>
+            </button>
+
             <input
               ref={inputRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="메시지를 입력하세요…"
-              // Intentionally NOT disabled during `sending`. Standard
-              // chat UX (ChatGPT, Slack, Discord) lets the user keep
-              // typing the next message while the previous one
-              // streams. The form's onSubmit handler and `send()`
-              // both bail when sending is true, so there's no race —
-              // the button just stays disabled until the round-trip
-              // completes.
+              placeholder={
+                listening
+                  ? '듣고 있어요… 말해주세요'
+                  : pendingImage
+                    ? '사진에 대해 물어볼 말 (생략 가능)…'
+                    : '메시지를 입력하세요…'
+              }
               autoFocus
               autoComplete="off"
               className="h-11 flex-1 rounded-full border border-brand-ink/12 bg-white px-5 font-sans text-[15px] text-brand-ink outline-none transition focus:border-brand-ink/40"
             />
             <button
               type="submit"
-              disabled={sending || !input.trim()}
+              disabled={sending || (!input.trim() && !pendingImage)}
               className="flex h-11 min-w-[72px] items-center justify-center rounded-full px-5 font-sans text-[14px] font-medium text-white transition disabled:opacity-60"
               style={{ background: character.accentColor }}
             >
@@ -783,10 +1119,12 @@ function ChatBubble({
   message,
   accentColor,
   onRegenerate,
+  onPlayTts,
 }: {
   message: UIMessage;
   accentColor: string;
   onRegenerate: () => void;
+  onPlayTts: (id: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   if (message.role === 'user') {
@@ -800,6 +1138,7 @@ function ChatBubble({
     );
   }
   const streaming = message.pending && !!message.content;
+  const ttsFilename = `${message.id.slice(0, 8)}.mp3`;
   return (
     <div
       className="max-w-[80%] cursor-pointer rounded-2xl bg-white px-4 py-2.5 font-sans text-[15px] leading-relaxed text-brand-ink shadow-xs"
@@ -820,7 +1159,69 @@ function ChatBubble({
         </>
       )}
       {open && message.content ? (
-        <div className="mt-2 flex gap-4 border-t border-brand-ink/10 pt-2">
+        <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-brand-ink/10 pt-2">
+          {/* Voice playback — fetches /api/tts on first click and
+              caches the blob URL on the message. Subsequent clicks
+              just replay the cached audio. */}
+          <button
+            type="button"
+            className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft transition hover:text-brand-ink disabled:opacity-50"
+            disabled={message.ttsLoading}
+            onClick={(e) => {
+              e.stopPropagation();
+              onPlayTts(message.id);
+            }}
+            title="음성으로 듣기"
+          >
+            {message.ttsLoading ? (
+              <span className="inline-flex items-center gap-0.5">
+                {[0, 160, 320].map((d) => (
+                  <span
+                    key={d}
+                    className="inline-block h-1 w-1 animate-typing-bounce rounded-full"
+                    style={{ background: accentColor, animationDelay: `${d}ms` }}
+                  />
+                ))}
+              </span>
+            ) : (
+              <svg width="11" height="11" viewBox="0 0 16 16" aria-hidden>
+                <path d="M3 6h2l3-3v10L5 10H3z" fill="currentColor" />
+                <path
+                  d="M11 6c1 .8 1 3.2 0 4M13 4c2 1.6 2 6.4 0 8"
+                  stroke="currentColor"
+                  strokeWidth="1.2"
+                  fill="none"
+                  strokeLinecap="round"
+                />
+              </svg>
+            )}
+            <span>{message.ttsUrl ? '다시 듣기' : '음성 듣기'}</span>
+          </button>
+
+          {/* Download button — only enabled after the TTS blob has been
+              fetched at least once (i.e., user pressed 음성 듣기). */}
+          {message.ttsUrl ? (
+            <a
+              href={message.ttsUrl}
+              download={ttsFilename}
+              onClick={(e) => e.stopPropagation()}
+              className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft transition hover:text-brand-ink"
+              title="MP3 다운로드"
+            >
+              <svg width="10" height="10" viewBox="0 0 16 16" aria-hidden>
+                <path
+                  d="M8 1 V11 M4 7 L8 11 L12 7 M2 14 H14"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              MP3
+            </a>
+          ) : null}
+
           <button
             type="button"
             className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
@@ -843,6 +1244,9 @@ function ChatBubble({
           >
             Regenerate
           </button>
+          {message.ttsError ? (
+            <span className="font-mono text-[10px] text-red-500">{message.ttsError}</span>
+          ) : null}
         </div>
       ) : null}
     </div>

@@ -17,6 +17,31 @@ interface ChatBody {
   nickname?: string;
   locationHint?: { lat: number; lng: number };
   tier?: 'free' | 'premium';
+  /**
+   * Optional image attached to the user's turn — sent through the
+   * "📷 카메라" composer button. The client encodes the file as a
+   * data URL (`data:image/jpeg;base64,...`) and ships it as-is.
+   * Size capped client-side; rejected here above 6MB to stay under
+   * the Anthropic / Gemini payload limits.
+   */
+  imageDataUrl?: string;
+}
+
+const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+
+/** Pull mediaType + raw base64 out of a `data:image/...;base64,...` URL.
+ *  Returns null for malformed inputs or unsupported mime types. */
+function parseImageDataUrl(
+  url: string | undefined,
+): { mediaType: string; base64: string } | null {
+  if (!url) return null;
+  const m = /^data:(image\/(?:jpe?g|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/i.exec(url);
+  if (!m) return null;
+  const mediaType = m[1]!.toLowerCase().replace('jpg', 'jpeg');
+  const base64 = m[2]!;
+  // base64 → bytes: roughly len * 3/4
+  if (base64.length * 0.75 > MAX_IMAGE_BYTES) return null;
+  return { mediaType, base64 };
 }
 
 export async function POST(req: Request): Promise<Response> {
@@ -27,11 +52,18 @@ export async function POST(req: Request): Promise<Response> {
     return jsonError('validation_error', 'Invalid JSON body', 400);
   }
 
-  const text = (body.text ?? '').trim();
+  let text = (body.text ?? '').trim();
   const characterId = body.characterId ?? '';
   const character = CHARACTERS[characterId];
   if (!character) return jsonError('not_found', 'Unknown character', 404);
-  if (!text) return jsonError('validation_error', 'Empty message', 400);
+  // Empty text is OK *only* when an image is attached — that's the
+  // "just look at this photo" flow. Otherwise we reject so we don't
+  // burn an LLM call on a blank message.
+  if (!text && !body.imageDataUrl)
+    return jsonError('validation_error', 'Empty message', 400);
+  // Give the vision model a sensible default prompt when the user
+  // sends a photo without typing anything.
+  if (!text && body.imageDataUrl) text = '이 사진 어때?';
 
   const nickname = (body.nickname ?? '').trim() || '친구';
   const tier = body.tier ?? 'free';
@@ -57,7 +89,30 @@ export async function POST(req: Request): Promise<Response> {
     openWeatherMapApiKey,
   });
 
-  const adapter = pickChatAdapter({ tier, mockMode, anthropicApiKey, geminiApiKey });
+  // Image: validated + decoded once here so the safeguard / weather
+  // calls above don't need to know about it. Both Claude and Gemini
+  // support vision via the same `userImage` field.
+  const userImage = parseImageDataUrl(body.imageDataUrl) ?? undefined;
+  if (body.imageDataUrl && !userImage) {
+    return jsonError(
+      'validation_error',
+      'Invalid or oversized image (max 6MB, jpeg/png/webp/gif).',
+      400,
+    );
+  }
+
+  // When an image is attached we strongly prefer Claude — its vision
+  // grounding is more reliable than Gemini's for our use cases, and
+  // it produces longer, more descriptive responses. Override the tier
+  // routing for this single turn so a free-tier user still gets a
+  // proper vision reply when they send a photo.
+  const visionTier = userImage && anthropicApiKey ? 'premium' : tier;
+  const adapter = pickChatAdapter({
+    tier: visionTier,
+    mockMode,
+    anthropicApiKey,
+    geminiApiKey,
+  });
 
   const userMessageId = cryptoRandom();
   const assistantMessageId = cryptoRandom();
@@ -78,6 +133,7 @@ export async function POST(req: Request): Promise<Response> {
           // server runs in UTC on Vercel, but our characters live in 한국.
           user: { nickname, locale: 'ko', localTime: formatKstLocalTime(), tier },
           userMessage: text,
+          userImage,
           ids: { userMessageId, assistantMessageId },
         })) {
           send(evt);
