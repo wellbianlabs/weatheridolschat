@@ -62,42 +62,42 @@ interface VoiceConfig {
 /**
  * Per-character voice presets.
  *
- * All four characters are 19-22yo K-pop idols, so the baseline target
- * is "young, bright, perky, slightly hi-toned". User feedback on the
- * previous mature-sounding settings: 목소리가 전체적으로 쳐져있고 나이들어
- * 보여. The fix:
+ * Target: 19-22yo female K-pop idol — bright, perky, hi-tone.
  *
- *   1. Pick the *youngest-timbred* Chirp3-HD voices Google ships for
- *      ko-KR (Leda > Zephyr > Kore for youthfulness; Aoede sounds the
- *      most mature, so we drop it from main slots).
- *   2. audioConfig.speakingRate goes UP (1.08–1.18) for the K-pop
- *      "fast and light" energy.
- *   3. Pitch lift moves entirely into the SSML prosody envelope below
- *      because Chirp3-HD ignores the audioConfig pitch field. We push
- *      pitch +2.5 to +4 semitones across the board — that's the
- *      delta that makes a voice read as "young female idol" instead
- *      of "smooth narrator".
+ * Key correction over the previous tuning:
+ *   - "Bright" comes from voice timbre + pitch + crisp articulation,
+ *     NOT from speed. Pushing rate above ~1.05 introduces audible
+ *     pitch-shift artifacts that the user described as "변형된 느낌"
+ *     (chipmunked, not natural-bright).
+ *   - So we keep rate near 1.0 and lift pitch instead. Brightness now
+ *     lives in: bright voice pick (Leda), strong positive pitch
+ *     (+3 to +4.5 semitones), and the audioConfig effects profile.
  *
- * audioConfig.pitch is only used by Neural2 fallback (supportsPitch
- * gate); we keep meaningful values here so fallback also sounds young.
+ * Voice picks rationalised — only Leda + Zephyr remain. Kore and
+ * Aoede both have inherently mature/calm timbres that no amount of
+ * pitch shift fully escapes, so we drop them.
+ *
+ * audioConfig.pitch values are for the Neural2 fallback path (which
+ * respects pitch strictly). The Chirp3-HD primary path applies pitch
+ * through the SSML envelope.
  */
 const VOICE_PRESETS: Record<CharacterId, VoiceConfig> = {
-  // 햇살같은 밝음, 가장 활기찬 → Leda (brightest), fastest
-  sunny: { voice: 'ko-KR-Chirp3-HD-Leda', rate: 1.12, pitch: 3.5 },
-  // 차분하지만 19세 → 같은 Leda 보이스인데 살짝 천천히 + 부드러움.
-  // 이전 Aoede는 성숙해서 빠짐 — Rain도 분명히 어린 톤이어야 함.
-  rain: { voice: 'ko-KR-Chirp3-HD-Leda', rate: 1.04, pitch: 2.5 },
-  // 18세, 가장 어린 — Kore 자체 음색이 성숙해서 pitch shift로 강하게
-  // 끌어올림. 몽환은 SSML pitch로, "어림"은 high pitch로.
-  cloudy: { voice: 'ko-KR-Chirp3-HD-Kore', rate: 1.08, pitch: 4.0 },
-  // 21세, 빠르고 단단함 — Zephyr 자체가 가장 에너제틱
-  thunder: { voice: 'ko-KR-Chirp3-HD-Zephyr', rate: 1.16, pitch: 3.0 },
+  // 햇살 밝음, 20yo — Leda는 ko-KR Chirp3-HD 중 가장 어린/밝은 톤
+  sunny: { voice: 'ko-KR-Chirp3-HD-Leda', rate: 1.04, pitch: 4.0 },
+  // 부드러운 19yo — 같은 Leda지만 살짝 천천히 + 살짝 낮은 pitch.
+  // 여전히 +2.5라서 young register 안에 머무름.
+  rain: { voice: 'ko-KR-Chirp3-HD-Leda', rate: 1.0, pitch: 2.5 },
+  // 18yo 가장 어린 — 가장 높은 pitch로 dreamy young. Kore에서
+  // Leda로 교체 (Kore는 차분/성숙해서 pitch만으론 부족).
+  cloudy: { voice: 'ko-KR-Chirp3-HD-Leda', rate: 1.02, pitch: 4.5 },
+  // 21yo 단단한 카리스마 — Zephyr 자체 텍스처가 sharp/energetic
+  thunder: { voice: 'ko-KR-Chirp3-HD-Zephyr', rate: 1.06, pitch: 3.5 },
 };
 
 const DEFAULT_VOICE: VoiceConfig = {
   voice: 'ko-KR-Chirp3-HD-Leda',
-  rate: 1.1,
-  pitch: 3.0,
+  rate: 1.02,
+  pitch: 3.5,
 };
 
 /** True for voices that accept the legacy `pitch` audioConfig field.
@@ -155,13 +155,13 @@ function chirpToNeural2(chirpName: string): string {
  * bonus — but only for emphasis spans, not the whole utterance.
  */
 const CHARACTER_PROSODY: Record<CharacterId, { pitch: string; volume: string }> = {
-  sunny: { pitch: '+3.5st', volume: 'medium' }, // 가장 발랄
-  rain: { pitch: '+2.5st', volume: 'medium' }, // 부드럽지만 young
-  cloudy: { pitch: '+4st', volume: 'medium' }, // 가장 어린 톤
-  thunder: { pitch: '+3st', volume: 'loud' }, // 단단한 young
+  sunny: { pitch: '+4st', volume: 'medium' }, // 햇살 밝음, 20yo
+  rain: { pitch: '+2.5st', volume: 'medium' }, // 부드러운 19yo
+  cloudy: { pitch: '+4.5st', volume: 'medium' }, // 가장 어린 18yo
+  thunder: { pitch: '+3.5st', volume: 'loud' }, // 단단한 21yo
 };
 
-const DEFAULT_PROSODY = { pitch: '+3st', volume: 'medium' } as const;
+const DEFAULT_PROSODY = { pitch: '+3.5st', volume: 'medium' } as const;
 
 /**
  * Convert raw text into emotion-aware SSML for natural-sounding TTS.
@@ -195,22 +195,23 @@ function textToSsml(text: string, characterId: CharacterId | undefined): string 
     const trimmed = chunk.trim();
     if (!trimmed) return chunk;
     // Excited — multiple !s or "와/우와/진짜/대박/짱..!"
+    // Pitch lift only, no rate boost — the audioConfig already has
+    // the character's baseline pace and we don't want to compound it
+    // into chipmunk territory.
     if (/!{2,}/.test(trimmed) || /\b(와|우와|진짜|대박|짱|헐|좋아)\b.*!/.test(trimmed)) {
-      return `<prosody pitch="+2st" rate="110%">${chunk}</prosody>`;
+      return `<prosody pitch="+2.5st">${chunk}</prosody>`;
     }
     // Mild excitement — single !
     if (/!\s*$/.test(trimmed)) {
-      return `<prosody pitch="+1st" rate="105%">${chunk}</prosody>`;
+      return `<prosody pitch="+1.5st">${chunk}</prosody>`;
     }
-    // Playful / drawn-out — trailing ~ or ~~ → small pitch lift,
-    // very slight slow for the trailing-vowel feel, but staying high
+    // Playful / drawn-out — trailing ~ or ~~
     if (/~+\s*$/.test(trimmed)) {
-      return `<prosody rate="98%" pitch="+1.5st">${chunk}</prosody>`;
+      return `<prosody pitch="+1.5st">${chunk}</prosody>`;
     }
-    // Question — small pitch lift on the closing syllable (Chirp3-HD
-    // already handles ?-intonation, this just nudges it). Not slowed.
+    // Question — small pitch lift on the closing syllable
     if (/\?\s*$/.test(trimmed)) {
-      return `<prosody pitch="+0.5st">${chunk}</prosody>`;
+      return `<prosody pitch="+1st">${chunk}</prosody>`;
     }
     // Note: removed the sad/wistful slowdown — it was making the
     // voice read as a mature narrator instead of a 19~21yo idol.
@@ -280,11 +281,17 @@ export async function POST(req: Request): Promise<Response> {
   const audioConfig: Record<string, unknown> = {
     audioEncoding: 'MP3',
     speakingRate: rate,
-    volumeGainDb: 1.5,
-    // Mastering profile tuned for the most common playback target.
-    // 'headphone-class-device' produces the warmest mids, which
-    // suits idol-character TTS better than the default flat output.
-    effectsProfileId: ['headphone-class-device'],
+    // Slight loudness boost for K-pop "alive" presence.
+    volumeGainDb: 2.0,
+    // 'handset-class-device' applies a treble lift / mid-presence
+    // tuning that makes voices read as brighter and more present —
+    // the opposite of 'headphone-class-device' which added warmth
+    // and contributed to the "쳐진" mature feel. This profile is
+    // tuned for phone speakers but the brightness translates well
+    // to laptop/headphones too.
+    effectsProfileId: ['handset-class-device'],
+    // Higher sample rate = crisper highs, more articulation detail.
+    sampleRateHertz: 24000,
   };
   if (supportsPitch(voice)) audioConfig.pitch = pitch;
 
@@ -328,8 +335,9 @@ export async function POST(req: Request): Promise<Response> {
         const retryAudio: Record<string, unknown> = {
           audioEncoding: 'MP3',
           speakingRate: rate,
-          volumeGainDb: 1.5,
-          effectsProfileId: ['headphone-class-device'],
+          volumeGainDb: 2.0,
+          effectsProfileId: ['handset-class-device'],
+          sampleRateHertz: 24000,
           pitch, // Neural2 accepts pitch
         };
         const retryRes = await fetch(
