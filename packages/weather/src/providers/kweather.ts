@@ -63,15 +63,18 @@ export function createKWeatherProvider(rawServiceKey: string): WeatherProvider {
   if (decodedAtBoot) {
     console.warn('[kweather] service key contained %-escapes; decoded once before use');
   }
+  // Sanity log: show key length + edges so we can confirm the env var actually
+  // reached the lambda (and isn't truncated). We never log the full key.
+  const keyFingerprint = `len=${serviceKey.length} head=${serviceKey.slice(0, 4)}… tail=…${serviceKey.slice(-4)}`;
+  console.info(`[kweather] init ${keyFingerprint}`);
+
   return {
     id: 'kweather',
     async fetchCurrent(point: GeoPoint): Promise<WeatherSnapshot> {
       const { nx, ny } = latLngToKmaGrid(point.lat, point.lng);
       const { baseDate, baseTime } = kmaBaseDateTime(new Date());
 
-      // Build query manually so we control encoding exactly once. Using
-      // url.searchParams.set with already-encoded values triggers double
-      // encoding on +, /, = characters.
+      // Build query manually so we control encoding exactly once.
       const params = new URLSearchParams();
       params.set('serviceKey', serviceKey);
       params.set('pageNo', '1');
@@ -87,12 +90,32 @@ export function createKWeatherProvider(rawServiceKey: string): WeatherProvider {
         signal: AbortSignal.timeout(10_000),
       });
       if (!res.ok) {
-        throw new Error(`KMA responded ${res.status}`);
+        // data.go.kr usually returns 200 with an error code in the body,
+        // but a true 4xx/5xx happens too. Pull the body so we surface the
+        // actual reason ("SERVICE_KEY_IS_NOT_REGISTERED_ERROR" etc.).
+        const body = await res.text().catch(() => '');
+        console.error(`[kweather] HTTP ${res.status} body=${body.slice(0, 300)}`);
+        throw new Error(`KMA responded ${res.status} ${body.slice(0, 200)}`);
       }
-      const data = (await res.json()) as KmaResponse;
+      // data.go.kr quirk: when the key is invalid, the server may return 200
+      // with content-type text/xml carrying an "OpenAPI_ServiceResponse"
+      // envelope (errMsg / returnReasonCode). Parse defensively.
+      const rawBody = await res.text();
+      let data: KmaResponse | undefined;
+      try {
+        data = JSON.parse(rawBody) as KmaResponse;
+      } catch {
+        const xmlReason = /<returnReasonCode>(\d+)<\/returnReasonCode>/.exec(rawBody)?.[1];
+        const xmlMsg = /<returnAuthMsg>([^<]+)<\/returnAuthMsg>/.exec(rawBody)?.[1]
+          ?? /<errMsg>([^<]+)<\/errMsg>/.exec(rawBody)?.[1];
+        console.error(`[kweather] non-json body code=${xmlReason ?? '?'} msg=${xmlMsg ?? rawBody.slice(0, 200)}`);
+        throw new Error(`KMA non-JSON: ${xmlMsg ?? xmlReason ?? 'unknown'}`);
+      }
       const code = data.response?.header?.resultCode;
       if (code && code !== '00') {
-        throw new Error(`KMA error: ${data.response?.header?.resultMsg ?? code}`);
+        const msg = data.response?.header?.resultMsg ?? code;
+        console.error(`[kweather] header code=${code} msg=${msg}`);
+        throw new Error(`KMA error: ${msg}`);
       }
       const items = data.response?.body?.items?.item ?? [];
       const map: Record<string, string> = {};
