@@ -107,10 +107,10 @@ importers:
   apps/web:
     dependencies:
       '@supabase/ssr':
-        specifier: ^0.5.1
+        specifier: ^0.5.2
         version: 0.5.2(@supabase/supabase-js@2.105.4)
       '@supabase/supabase-js':
-        specifier: ^2.45.4
+        specifier: ^2.105.4
         version: 2.105.4
       '@wi/ai':
         specifier: workspace:*

@@ -5,6 +5,8 @@ import { classifyIntent } from '@wi/core/chat';
 import { pickProductForCharacter } from '@wi/core/monetization';
 import { runInputSafeguard } from '@wi/core/safeguards';
 import { formatKstLocalTime } from '@wi/core/time';
+
+import { resolveUser } from '@/lib/supabase/identity';
 import { pickChatAdapter, SYSTEM_PROMPTS } from '@wi/ai';
 import { getCurrentWeather } from '@wi/weather';
 
@@ -66,7 +68,21 @@ export async function POST(req: Request): Promise<Response> {
   if (!text && body.imageDataUrl) text = '이 사진 어때?';
 
   const nickname = (body.nickname ?? '').trim() || '친구';
-  const tier = body.tier ?? 'free';
+
+  // ── Identity + tier resolution ────────────────────────────────
+  // Phase 1: read the signed-in user from Supabase. Admin emails
+  // map to tier='admin' which bypasses every quota gate later.
+  // Anonymous visitors fall back to body.tier (defaults to 'free').
+  // Phase 2+ will swap the non-admin tier for a real DB lookup.
+  const caller = await resolveUser();
+  const tier: 'free' | 'premium' = caller?.isAdmin
+    ? 'premium' // admin gets the premium-quality adapter
+    : (body.tier ?? 'free');
+  if (caller) {
+    console.info(
+      `[chat] caller id=${caller.id.slice(0, 8)}… email=${caller.email ?? '-'} tier=${caller.tier}`,
+    );
+  }
 
   // Env-driven configuration. Real keys → live; missing → mock fallback.
   const mockMode = process.env.MOCK_MODE !== 'false';
@@ -214,6 +230,9 @@ export async function POST(req: Request): Promise<Response> {
       Connection: 'keep-alive',
       'X-Adapter': adapter.id,
       'X-Provider-Mode': mockMode ? 'mock' : 'live',
+      // Tier resolved server-side. Client uses this to show
+      // appropriate UI badges (admin / free / premium).
+      'X-User-Tier': caller?.tier ?? 'anon',
     },
   });
 }

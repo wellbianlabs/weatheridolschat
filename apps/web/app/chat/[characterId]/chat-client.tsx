@@ -10,6 +10,7 @@ import type { WeatherSnapshot } from '@wi/core/weather';
 import { Button, Chip, Eyebrow } from '@wi/ui/web';
 
 import WeatherBackground from '@/components/WeatherBackground';
+import { getBrowserSupabase } from '@/lib/supabase/browser';
 
 /**
  * Minimal subset of the Web Speech API surface we use. The actual
@@ -199,6 +200,11 @@ export default function ChatClient({ character }: { character: Character }) {
   ]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  // Signed-in account snapshot. Phase 1 just shows the email/admin
+  // badge in the header — quota enforcement uses this in Phase 2+.
+  const [account, setAccount] = useState<{ email: string | null; isAdmin: boolean } | null>(
+    null,
+  );
   // Pending image to send with the next message (from camera/file picker).
   // Held as a data URL so we can both preview it locally and ship it
   // through /api/chat without any extra encoding step.
@@ -228,6 +234,32 @@ export default function ChatClient({ character }: { character: Character }) {
     if (prior && prior.length > 0) setMessages(prior);
     setUsage(getTodayCount());
   }, [character.id]);
+
+  // Load + subscribe to Supabase auth state. The admin email is
+  // hard-coded in lib/supabase/identity.ts; the client UI keeps a
+  // sync'd copy here so the header chip can show "admin" / email /
+  // "로그인" instantly without a server round-trip.
+  useEffect(() => {
+    const supabase = getBrowserSupabase();
+    if (!supabase) return;
+    let alive = true;
+    const adminEmails = ['admin@wellbianlabs.io']; // client-side mirror of the server allowlist
+    const apply = (email: string | null) => {
+      if (!alive) return;
+      setAccount({
+        email,
+        isAdmin: !!email && adminEmails.includes(email.toLowerCase()),
+      });
+    };
+    void supabase.auth.getUser().then(({ data }) => apply(data.user?.email ?? null));
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
+      apply(session?.user?.email ?? null);
+    });
+    return () => {
+      alive = false;
+      sub.subscription.unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     saveHistory(character.id, messages);
@@ -877,9 +909,7 @@ export default function ChatClient({ character }: { character: Character }) {
                 {character.displayName}
               </span>
             </div>
-            <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
-              {Number.isFinite(MAX_FREE_MESSAGES) ? `${usage}/${MAX_FREE_MESSAGES}` : `오늘 ${usage}회`}
-            </span>
+            <AccountChip account={account} usage={usage} />
           </div>
           <div className="border-t border-brand-ink/8 bg-brand-paper/50 px-6 py-1.5">
             <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
@@ -1794,6 +1824,66 @@ function parseLyrics(raw: string): LyricsSection[] {
   // unlabeled block so the user still sees structured text.
   if (sections.length === 0) sections.push({ label: null, lines: [text] });
   return sections;
+}
+
+/**
+ * Header-right chip showing the current login state.
+ *
+ *   • Admin signed in    → red ADMIN pill (instantly recognizable)
+ *   • Regular user       → email + "Logout" link
+ *   • Anonymous          → "Login" link to /login
+ *
+ * Phase 1 also keeps the today's-usage counter visible underneath
+ * (informational only; not enforced yet — Phase 2 hooks it up to a
+ * server-backed quota).
+ */
+function AccountChip({
+  account,
+  usage,
+}: {
+  account: { email: string | null; isAdmin: boolean } | null;
+  usage: number;
+}) {
+  const email = account?.email ?? null;
+  const isAdmin = account?.isAdmin ?? false;
+  return (
+    <div className="flex flex-col items-end gap-0.5">
+      {isAdmin ? (
+        <a
+          href="/auth/logout"
+          className="rounded-full bg-red-500/15 px-2 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-red-600 hover:bg-red-500/25"
+          title={`${email} — 로그아웃`}
+        >
+          ★ Admin
+        </a>
+      ) : email ? (
+        <div className="flex items-center gap-1.5">
+          <span
+            className="max-w-[120px] truncate font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft"
+            title={email}
+          >
+            {email.split('@')[0]}
+          </span>
+          <a
+            href="/auth/logout"
+            className="font-mono text-[9px] uppercase tracking-eyebrow text-brand-ink-soft/70 hover:text-brand-ink"
+          >
+            ↗
+          </a>
+        </div>
+      ) : (
+        <a
+          href="/login"
+          className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
+        >
+          Login →
+        </a>
+      )}
+      <span className="font-mono text-[9px] uppercase tracking-eyebrow text-brand-ink-soft/70">
+        오늘 {usage}회
+      </span>
+    </div>
+  );
 }
 
 /**
