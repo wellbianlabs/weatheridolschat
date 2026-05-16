@@ -11,7 +11,15 @@ import { Button, Chip, Eyebrow } from '@wi/ui/web';
 
 import WeatherBackground from '@/components/WeatherBackground';
 
-type MessageKind = 'text' | 'image' | 'product';
+type MessageKind = 'text' | 'image' | 'product' | 'music';
+interface MusicTrack {
+  taskId: string;
+  title?: string;
+  audioUrl?: string;
+  lyrics?: string;
+  status: 'queued' | 'streaming' | 'done' | 'failed';
+  error?: string;
+}
 interface UIMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -19,6 +27,7 @@ interface UIMessage {
   content?: string;
   imageUrl?: string;
   product?: ProductPayload;
+  music?: MusicTrack;
   pending?: boolean;
 }
 
@@ -41,8 +50,12 @@ const WEATHER_LABEL: Record<string, string> = {
 
 const SHORTCUTS = [
   { id: 'selfie', label: '셀카 한 장', text: '오늘 셀카 보여줘!' },
+  // The 날씨송 shortcut is intentionally placed second and uses a music
+  // emoji so it reads as a distinct "feature" rather than just a question.
+  // When tapped, the server-side intent classifier picks up "노래/만들어"
+  // and emits request_song → the client kicks off /api/music + polls.
+  { id: 'weather-song', label: '🎵 날씨송 만들기', text: '오늘 날씨에 어울리는 노래 만들어줘' },
   { id: 'recommend', label: '추천해줘', text: '오늘 뭐 추천해줄래?' },
-  { id: 'song', label: '오늘의 노래', text: '오늘 어울리는 노래 추천해줘' },
 ];
 
 function storageKey(characterId: string) {
@@ -133,6 +146,110 @@ export default function ChatClient({ character }: { character: Character }) {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages]);
 
+  /**
+   * Kick off a Suno weather-song generation and poll until it returns
+   * a playable URL. The card stays mounted in the chat the whole time —
+   * we update the underlying message's `music` field as state moves
+   * queued → streaming → done so the UI can show the right copy.
+   */
+  async function generateWeatherSong(songId: string, userText: string) {
+    const updateMusic = (patch: Partial<MusicTrack>, pending: boolean) =>
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === songId
+            ? {
+                ...m,
+                pending,
+                music: { ...(m.music ?? { taskId: '', status: 'queued' }), ...patch },
+              }
+            : m,
+        ),
+      );
+
+    // Kickoff
+    let kickoff: {
+      taskId?: string;
+      title?: string;
+      audioUrl?: string;
+      lyrics?: string;
+      status?: MusicTrack['status'];
+      error?: { code?: string; message?: string };
+    };
+    try {
+      const res = await fetch('/api/music', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          characterId: character.id,
+          userPrompt: userText,
+          title: `${character.displayName}의 오늘 날씨송`,
+        }),
+      });
+      kickoff = await res.json();
+      if (!res.ok || !kickoff.taskId) {
+        const reason = kickoff.error?.message ?? `HTTP ${res.status}`;
+        updateMusic({ status: 'failed', error: truncate(reason, 140) }, false);
+        return;
+      }
+    } catch (err) {
+      updateMusic({ status: 'failed', error: truncate((err as Error).message, 120) }, false);
+      return;
+    }
+
+    // First result might already be 'done' (Mock adapter is synchronous).
+    updateMusic(
+      {
+        taskId: kickoff.taskId,
+        title: kickoff.title,
+        audioUrl: kickoff.audioUrl,
+        lyrics: kickoff.lyrics,
+        status: kickoff.status ?? 'queued',
+      },
+      kickoff.status !== 'done',
+    );
+    if (kickoff.status === 'done' && kickoff.audioUrl) return;
+
+    // Poll Suno every 4s, max ~3min. Suno typically finishes in 20–60s.
+    const taskId = kickoff.taskId;
+    const deadline = Date.now() + 3 * 60_000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 4000));
+      try {
+        const r = await fetch(`/api/music?taskId=${encodeURIComponent(taskId)}`);
+        const d = (await r.json()) as {
+          status?: MusicTrack['status'];
+          audioUrl?: string;
+          title?: string;
+          lyrics?: string;
+          error?: { message?: string };
+        };
+        if (!r.ok) {
+          updateMusic(
+            { status: 'failed', error: truncate(d.error?.message ?? `HTTP ${r.status}`, 140) },
+            false,
+          );
+          return;
+        }
+        updateMusic(
+          {
+            status: d.status ?? 'queued',
+            audioUrl: d.audioUrl,
+            title: d.title,
+            lyrics: d.lyrics,
+          },
+          d.status !== 'done' && d.status !== 'failed',
+        );
+        if (d.status === 'done' || d.status === 'failed') return;
+      } catch {
+        // Transient network blip — keep polling until deadline.
+      }
+    }
+    updateMusic(
+      { status: 'failed', error: '시간이 초과됐어. 잠시 후 다시 시도해줘.' },
+      false,
+    );
+  }
+
   async function send(text: string) {
     if (!text || sending) return;
     if (getTodayCount() >= MAX_FREE_MESSAGES) {
@@ -152,6 +269,7 @@ export default function ChatClient({ character }: { character: Character }) {
     ]);
 
     let imageIntentTriggered = false;
+    let songIntentTriggered = false;
     let productCard: ProductPayload | null = null;
 
     try {
@@ -191,6 +309,8 @@ export default function ChatClient({ character }: { character: Character }) {
               );
             } else if (evt.type === 'tool' && evt.name === 'request_image') {
               imageIntentTriggered = true;
+            } else if (evt.type === 'tool' && evt.name === 'request_song') {
+              songIntentTriggered = true;
             } else if (evt.type === 'attachment' && evt.payload?.kind === 'product') {
               productCard = evt.payload as unknown as ProductPayload;
             } else if (evt.type === 'error') {
@@ -291,6 +411,26 @@ export default function ChatClient({ character }: { character: Character }) {
           );
         }
       }
+
+      // ── Weather song generation ────────────────────────────────────
+      // Suno takes 20–60s, so we render a music card immediately in
+      // "queued" status and poll /api/music?taskId=... until done. The
+      // card transitions through queued → streaming → done with the
+      // audio element appearing once an audioUrl is available.
+      if (songIntentTriggered) {
+        const songId = crypto.randomUUID();
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: songId,
+            role: 'assistant',
+            kind: 'music',
+            pending: true,
+            music: { taskId: '', status: 'queued' },
+          },
+        ]);
+        void generateWeatherSong(songId, text);
+      }
     } catch {
       setMessages((prev) =>
         prev.map((m) =>
@@ -386,6 +526,13 @@ export default function ChatClient({ character }: { character: Character }) {
                   product={m.product}
                   accent={character.accentColor}
                   from={character.displayName}
+                />
+              ) : m.kind === 'music' && m.music ? (
+                <WeatherSongCard
+                  track={m.music}
+                  accent={character.accentColor}
+                  from={character.displayName}
+                  weatherLabel={weather ? WEATHER_LABEL[weather.condition] ?? weather.condition : ''}
                 />
               ) : (
                 <ChatBubble
@@ -557,6 +704,126 @@ function ChatBubble({
           </button>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Music card for the 날씨송 feature. Renders a gradient album-cover
+ * placeholder using the character's accent color, plus state-aware copy
+ * for the long-running Suno task:
+ *
+ *   queued    → "작사하는 중…"        (animated dots, no audio yet)
+ *   streaming → "녹음하는 중…"        (animated dots, no audio yet)
+ *   done      → audio <audio controls> + collapsible lyrics
+ *   failed    → friendly error + the underlying reason in parens
+ *
+ * Status copy is in present continuous Korean so it feels like the
+ * character is actually working on the song right now ("작사 중" reads
+ * differently than "loading…").
+ */
+function WeatherSongCard({
+  track,
+  accent,
+  from,
+  weatherLabel,
+}: {
+  track: MusicTrack;
+  accent: string;
+  from: string;
+  weatherLabel: string;
+}) {
+  const [lyricsOpen, setLyricsOpen] = useState(false);
+  const title = track.title ?? `${from}의 오늘 날씨송`;
+  const subtitle = weatherLabel ? `${weatherLabel} · ${from}` : from;
+
+  let statusCopy = '';
+  if (track.status === 'queued') statusCopy = '작사하는 중';
+  else if (track.status === 'streaming') statusCopy = '녹음하는 중';
+  else if (track.status === 'failed') statusCopy = '실패';
+
+  return (
+    <div className="w-full max-w-[320px] overflow-hidden rounded-2xl bg-white shadow-md">
+      {/* Album-cover style header — gradient backdrop in character accent. */}
+      <div
+        className="relative h-32 w-full"
+        style={{
+          background: `linear-gradient(135deg, ${accent} 0%, #241b3e 100%)`,
+        }}
+      >
+        {/* Soft sheen sweep while generating */}
+        {track.status !== 'done' && track.status !== 'failed' ? (
+          <div
+            aria-hidden
+            className="absolute inset-0 animate-sheen-sweep"
+            style={{
+              background:
+                'linear-gradient(105deg, transparent 30%, rgba(255,255,255,0.35) 50%, transparent 70%)',
+              backgroundSize: '200% 100%',
+            }}
+          />
+        ) : null}
+        <div className="absolute inset-x-4 bottom-3 flex items-end justify-between text-white">
+          <span aria-hidden className="font-display text-3xl leading-none">
+            ♪
+          </span>
+          <span className="font-mono text-[9px] uppercase tracking-eyebrow opacity-90">
+            Weather Song
+          </span>
+        </div>
+      </div>
+
+      <div className="space-y-2 px-4 py-3">
+        <div className="font-display text-lg leading-tight tracking-tight text-brand-ink">
+          {title}
+        </div>
+        <div className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
+          {subtitle}
+        </div>
+
+        {/* Body: dots+copy while pending, audio+lyrics once done, error otherwise */}
+        {track.status === 'done' && track.audioUrl ? (
+          <div className="space-y-2 pt-1">
+            {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+            <audio controls preload="none" src={track.audioUrl} className="w-full" />
+            {track.lyrics ? (
+              <>
+                <button
+                  type="button"
+                  className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
+                  onClick={() => setLyricsOpen((v) => !v)}
+                >
+                  {lyricsOpen ? '가사 접기' : '가사 보기'}
+                </button>
+                {lyricsOpen ? (
+                  <pre className="mt-1 whitespace-pre-wrap rounded-xl bg-brand-paper px-3 py-2 font-sans text-[12px] leading-relaxed text-brand-ink-soft">
+                    {track.lyrics}
+                  </pre>
+                ) : null}
+              </>
+            ) : null}
+          </div>
+        ) : track.status === 'failed' ? (
+          <p className="font-sans text-[13px] leading-relaxed text-brand-ink-soft">
+            노래를 만들지 못했어. {track.error ? `(${track.error})` : ''}
+          </p>
+        ) : (
+          <div className="flex items-center gap-2 pt-1">
+            <span className="inline-flex items-center gap-1">
+              {[0, 160, 320].map((delay) => (
+                <span
+                  key={delay}
+                  className="inline-block h-1.5 w-1.5 animate-typing-bounce rounded-full"
+                  style={{ background: accent, animationDelay: `${delay}ms` }}
+                />
+              ))}
+            </span>
+            <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
+              {statusCopy}
+            </span>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
