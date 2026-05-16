@@ -50,20 +50,38 @@ export function createSunoAdapter(opts: {
     async generate(input: MusicAdapterInput): Promise<MusicAdapterResult> {
       const styleHint = input.styleHint ?? defaultStyleFor(input.characterId);
       const title = input.title ?? defaultTitleFor(input.characterId);
-      const prompt = `${input.userPrompt} — weather: ${input.weather.condition}, ${input.weather.temperatureC}°C`;
+
+      // Inspiration mode (customMode=false) — Suno generates the full
+      // lyrics, melody, structure, and even the title from a single
+      // description. The previous customMode=true setup treated our
+      // short server-side `prompt` as the LYRICS to be sung, which is
+      // why the response `prompt` field came back as a 12-word echo
+      // instead of a full song's worth of verses + chorus + bridge.
+      //
+      // We compose a rich brief that combines:
+      //   1. The user's free-form request ("오늘 날씨에 어울리는 노래…")
+      //   2. The character's musical identity (bright k-pop / lo-fi /
+      //      bedroom pop / edm trap — per defaultStyleFor)
+      //   3. Concrete weather grounding (condition + temperature) so the
+      //      lyrics feel about *today*, not generic
+      //   4. Hard-coded "Korean female vocal" so we never get an English
+      //      cover.
+      const brief = buildInspirationBrief({
+        characterId: input.characterId,
+        weather: input.weather,
+        userPrompt: input.userPrompt,
+        styleHint,
+      });
 
       const body = {
-        // sunoapi.org "custom" mode lets us pass style + title separately.
-        customMode: true,
+        customMode: false,
         instrumental: input.instrumental ?? false,
-        prompt,
-        style: styleHint,
-        title,
+        prompt: brief,
         model: 'V4_5',
         callBackUrl,
       };
       console.info(
-        `[suno] generate character=${input.characterId} title="${title}" style="${styleHint}" model=V4_5`,
+        `[suno] generate character=${input.characterId} mode=inspiration model=V4_5 briefLen=${brief.length}`,
       );
 
       const t0 = Date.now();
@@ -107,7 +125,7 @@ export function createSunoAdapter(opts: {
         taskId,
         status: 'queued',
         model: 'suno-v4.5',
-        prompt,
+        prompt: brief,
         title,
       };
     },
@@ -258,6 +276,74 @@ function findFirstClip(r: SunoRecord | undefined): SunoClip | undefined {
     if (Array.isArray(arr) && arr.length > 0) return arr[0];
   }
   return undefined;
+}
+
+/**
+ * Build a single-paragraph description for Suno's inspiration mode.
+ *
+ * Inspiration mode reads `prompt` as a creative brief and writes the
+ * lyrics, melody, and structure from scratch — so the brief needs to
+ * carry every angle we care about (character mood, weather grounding,
+ * musical style, vocal language) in one tight paragraph. Anything
+ * Suno can't see here will be guessed.
+ */
+function buildInspirationBrief(input: {
+  characterId: string;
+  weather: import('@wi/core/weather').WeatherSnapshot;
+  userPrompt: string;
+  styleHint: string;
+}): string {
+  const personality = PERSONA_FOR_LYRICS[input.characterId] ?? 'a young K-pop idol';
+  const wx = describeWeatherKR(input.weather.condition);
+  const tempPhrase = `${Math.round(input.weather.temperatureC)}°C`;
+  const user = input.userPrompt?.trim() ?? '';
+  const userLine = user
+    ? `The listener said: "${user.slice(0, 160)}".`
+    : '';
+
+  return [
+    `Write a Korean-language song performed by ${personality}.`,
+    `Today's weather is ${wx} at ${tempPhrase}; the lyrics should be grounded in that specific scene (sky, light, air, sounds, what the listener might be doing).`,
+    `Musical direction: ${input.styleHint}. Female Korean vocal, native pronunciation, idiomatic phrasing.`,
+    `Structure: [Verse 1] → [Chorus] → [Verse 2] → [Chorus] → [Bridge] → [Outro], at least 16 distinct lines total, no English filler.`,
+    userLine,
+    'Make it feel personal and intimate — like a message from the idol to a single listener.',
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
+
+/** Compact persona blurb per character, only used inside the lyric brief. */
+const PERSONA_FOR_LYRICS: Record<string, string> = {
+  sunny:
+    'Sunny, a cheerful 20-year-old K-pop idol with a warm radiant energy who turns small moments into bright memories',
+  rain: 'Rain, a 19-year-old K-pop idol with a quiet introspective voice who finds beauty in stillness and lingering feelings',
+  cloudy:
+    'Cloudy, an 18-year-old artsy K-pop idol with a dreamy whimsical voice, like daydreams on a slow afternoon',
+  thunder:
+    'Thunder, a 21-year-old confident K-pop idol with a bold rebellious edge, sharp and electric',
+};
+
+/** Map weather condition → vivid Korean-friendly English description for Suno. */
+function describeWeatherKR(c: string): string {
+  switch (c) {
+    case 'clear':
+      return 'a clear sunny day with golden afternoon light and a soft breeze';
+    case 'clouds':
+      return 'an overcast day with soft diffused light and a quiet sky';
+    case 'rain':
+      return 'a rainy day with raindrops on windows, wet asphalt, and city lights bleeding into puddles';
+    case 'drizzle':
+      return 'a light drizzle, soft and barely there, with damp pastel skies';
+    case 'thunder':
+      return 'a stormy night with distant thunder and dramatic dark blue tones';
+    case 'snow':
+      return 'a soft snowy day with snowflakes drifting down, crisp cold air';
+    case 'mist':
+      return 'a foggy morning with thick mist and muted hazy tones';
+    default:
+      return 'today';
+  }
 }
 
 function defaultStyleFor(characterId: string): string {

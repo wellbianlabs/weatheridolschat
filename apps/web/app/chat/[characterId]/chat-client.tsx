@@ -1162,39 +1162,69 @@ function fmtTime(seconds: number): string {
  */
 function LyricsView({ lyrics, accent }: { lyrics: string; accent: string }) {
   const sections = useMemo(() => parseLyrics(lyrics), [lyrics]);
+  const [expanded, setExpanded] = useState(false);
+  // Compute total line count so the toggle only shows when there's a
+  // real reason to collapse (short lyrics fit fully without scrolling).
+  const totalLines = sections.reduce((n, s) => n + s.lines.length, 0);
+  const isLong = totalLines > 12;
+  const collapsed = isLong && !expanded;
 
   return (
     <div>
-      <div className="mb-1.5 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
-        가사
+      <div className="mb-1.5 flex items-center justify-between">
+        <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
+          가사 · {totalLines}줄
+        </span>
+        {isLong ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
+          >
+            {expanded ? '접기' : '전체 보기'}
+          </button>
+        ) : null}
       </div>
-      <div className="max-h-72 space-y-3 overflow-y-auto rounded-xl bg-brand-paper px-3.5 py-3">
-        {sections.map((sec, i) => (
-          <div key={i}>
-            {sec.label ? (
-              <div className="mb-1 flex items-center gap-2">
-                <span
-                  className="inline-block h-[3px] w-3 rounded-full"
-                  style={{ background: accent }}
-                />
-                <span
-                  className="font-mono text-[10px] uppercase tracking-eyebrow"
-                  style={{ color: accent }}
+      <div className="relative">
+        <div
+          className={`space-y-3 rounded-xl bg-brand-paper px-3.5 py-3 ${
+            collapsed ? 'max-h-56 overflow-hidden' : ''
+          }`}
+        >
+          {sections.map((sec, i) => (
+            <div key={i}>
+              {sec.label ? (
+                <div className="mb-1 flex items-center gap-2">
+                  <span
+                    className="inline-block h-[3px] w-3 rounded-full"
+                    style={{ background: accent }}
+                  />
+                  <span
+                    className="font-mono text-[10px] uppercase tracking-eyebrow"
+                    style={{ color: accent }}
+                  >
+                    {sec.label}
+                  </span>
+                </div>
+              ) : null}
+              {sec.lines.map((line, j) => (
+                <p
+                  key={j}
+                  className="font-sans text-[13px] leading-[1.7] text-brand-ink"
                 >
-                  {sec.label}
-                </span>
-              </div>
-            ) : null}
-            {sec.lines.map((line, j) => (
-              <p
-                key={j}
-                className="font-sans text-[13px] leading-[1.7] text-brand-ink"
-              >
-                {line}
-              </p>
-            ))}
-          </div>
-        ))}
+                  {line}
+                </p>
+              ))}
+            </div>
+          ))}
+        </div>
+        {/* Bottom fade when collapsed — visual hint there's more content */}
+        {collapsed ? (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-12 rounded-b-xl bg-gradient-to-t from-brand-paper to-transparent"
+          />
+        ) : null}
       </div>
     </div>
   );
