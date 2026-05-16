@@ -1,3 +1,5 @@
+import { getActiveSubscription } from '../payments';
+
 import { getServerSupabase } from './server';
 
 /**
@@ -11,6 +13,13 @@ export interface ResolvedUser {
   tier: 'admin' | 'premium' | 'free' | 'anon';
   /** True when this is the hard-coded admin account — bypasses all quotas. */
   isAdmin: boolean;
+  /** Set when the user has an active or grace-period subscription —
+   *  used by /account to render plan + expiry. Null for free users. */
+  subscription?: {
+    plan: 'monthly' | 'yearly';
+    status: 'active' | 'canceled' | 'expired' | 'past_due';
+    currentPeriodEnd: string;
+  } | null;
 }
 
 /**
@@ -48,11 +57,30 @@ export async function resolveUser(): Promise<ResolvedUser | null> {
   if (error || !data.user) return null;
   const email = data.user.email ?? null;
   const isAdmin = !!email && getAdminEmails().includes(email.toLowerCase());
+
+  // Admin short-circuit — no point querying subscriptions for them.
+  if (isAdmin) {
+    return { id: data.user.id, email, tier: 'admin', isAdmin: true, subscription: null };
+  }
+
+  // Phase 4: promote to 'premium' tier when the user has an
+  // active OR canceled-but-still-paid subscription. The helper
+  // already filters by current_period_end >= now() so a fully
+  // expired sub is not returned.
+  const sub = await getActiveSubscription(data.user.id);
+  const tier: ResolvedUser['tier'] = sub ? 'premium' : 'free';
   return {
     id: data.user.id,
     email,
-    tier: isAdmin ? 'admin' : 'free',
-    isAdmin,
+    tier,
+    isAdmin: false,
+    subscription: sub
+      ? {
+          plan: sub.plan,
+          status: sub.status,
+          currentPeriodEnd: sub.currentPeriodEnd,
+        }
+      : null,
   };
 }
 

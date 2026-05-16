@@ -35,6 +35,11 @@ export const ServerEnvSchema = z.object({
   KWEATHER_API_KEY: stringOrEmpty,
   OPENWEATHERMAP_API_KEY: stringOrEmpty,
 
+  // Payments
+  NEXT_PUBLIC_TOSS_CLIENT_KEY: stringOrEmpty,
+  TOSS_SECRET_KEY: stringOrEmpty,
+  ADMIN_EMAILS: stringOrEmpty,
+
   // Affiliate
   NASMEDIA_API_KEY: stringOrEmpty,
 

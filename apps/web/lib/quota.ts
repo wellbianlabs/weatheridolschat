@@ -1,6 +1,7 @@
-import { PLANS, type Tier } from '@wi/core/monetization';
+import { CREDIT_COSTS, PLANS, type Tier } from '@wi/core/monetization';
 import { kstDateString } from '@wi/core/time';
 
+import { consumeCredits, getCreditBalance } from './payments';
 import { resolveUser, type ResolvedUser } from './supabase/identity';
 import { getServiceSupabase } from './supabase/service';
 
@@ -40,6 +41,19 @@ const FIELD_TO_LIMIT_KEY: Record<QuotaField, keyof (typeof PLANS)['free']> = {
   vision: 'dailyVision',
 };
 
+/**
+ * Credit cost per credit-priced feature. `undefined` means "this
+ * field is quota-only" — chat / vision / tts can't be paid for with
+ * credits, only via subscription or the daily allowance.
+ */
+const CREDIT_COST_BY_FIELD: Record<QuotaField, number | undefined> = {
+  messages: undefined,
+  vision: undefined,
+  tts_chars: undefined,
+  selfies: CREDIT_COSTS.selfie,
+  songs: CREDIT_COSTS.song,
+};
+
 export interface QuotaUsageRow {
   messages: number;
   selfies: number;
@@ -72,6 +86,10 @@ export interface QuotaResult {
   code?: 'rate_limit' | 'auth_required' | 'service_unavailable';
   /** User-facing Korean message when blocked. */
   message?: string;
+  /** Set when the daily quota was exhausted AND the user paid out of
+   *  credits instead. Lets routes log + return the new balance to
+   *  the client so the AccountChip / paywall can reflect it. */
+  paidWithCredits?: { cost: number; balanceAfter: number };
 }
 
 /**
@@ -135,6 +153,30 @@ export async function consumeQuota(opts: {
   const projected = used + cost;
 
   if (projected > limit) {
+    // ── Credits fallback ──────────────────────────────────────────
+    // For credit-priced features (selfie / song) the user can pay
+    // out of their credit balance once daily quota is exhausted.
+    // Chat / vision / tts stay quota-only — they're either free
+    // forever or subscription-only, never credit-priced.
+    const creditCost = CREDIT_COST_BY_FIELD[opts.field];
+    if (creditCost && cost > 0) {
+      const consumed = await consumeCredits(user.id, creditCost * cost);
+      if (consumed.ok) {
+        console.info(
+          `[quota] credits fallback user=${user.id.slice(0, 8)}… field=${opts.field} cost=${creditCost * cost} balanceAfter=${consumed.balanceAfter}`,
+        );
+        return {
+          allowed: true,
+          user,
+          tier,
+          limit,
+          used,
+          remaining: 0,
+          paidWithCredits: { cost: creditCost * cost, balanceAfter: consumed.balanceAfter },
+        };
+      }
+    }
+
     return {
       allowed: false,
       user,
@@ -315,11 +357,25 @@ function rateLimitMessage(field: QuotaField, tier: Tier): string {
  */
 export function quotaHeaders(result: QuotaResult, field: QuotaField): Record<string, string> {
   const inf = (n: number) => (Number.isFinite(n) ? String(n) : 'inf');
-  return {
+  const headers: Record<string, string> = {
     'X-Tier': result.tier,
     'X-Quota-Field': field,
     'X-Quota-Limit': inf(result.limit),
     'X-Quota-Used': inf(result.used),
     'X-Quota-Remaining': inf(result.remaining),
   };
+  if (result.paidWithCredits) {
+    headers['X-Credits-Spent'] = String(result.paidWithCredits.cost);
+    headers['X-Credits-Balance'] = String(result.paidWithCredits.balanceAfter);
+  }
+  return headers;
+}
+
+/** Expose the user's current credit balance with the same `null safe`
+ *  guarantees as the quota helper — null user → 0. */
+export async function peekCreditBalance(caller?: ResolvedUser | null): Promise<number> {
+  const user = caller ?? (await resolveUser());
+  if (!user) return 0;
+  const row = await getCreditBalance(user.id);
+  return row.balance;
 }
