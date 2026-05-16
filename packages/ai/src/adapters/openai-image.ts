@@ -254,8 +254,23 @@ function buildUserFacingError(reason: string, characterId: string): string {
       `(원본: ${reason})`,
     ].join(' ');
   }
+  if (r.includes('billing_hard_limit_reached') || r.includes('billing_limit')) {
+    return [
+      'OpenAI 계정의 결제 한도(hard limit)에 도달했어요.',
+      'platform.openai.com/settings/organization/billing/limits 에서',
+      'Usage limit을 올리거나 크레딧을 충전해주세요.',
+      `(원본: ${reason})`,
+    ].join(' ');
+  }
+  if (r.includes('insufficient_quota')) {
+    return [
+      'OpenAI 크레딧이 부족해요.',
+      'platform.openai.com/settings/organization/billing 에서 크레딧을 충전해주세요.',
+      `(원본: ${reason})`,
+    ].join(' ');
+  }
   if (r.includes('status=429') || r.includes('rate_limit') || r.includes('quota')) {
-    return `OpenAI 호출 한도를 초과했어요. 1~2분 후 다시 시도해주세요. (${reason})`;
+    return `OpenAI 호출 속도 한도에 걸렸어요. 1~2분 후 다시 시도해주세요. (${reason})`;
   }
   if (r.includes('status=401') || r.includes('invalid_api_key')) {
     return `OpenAI API 키가 거부됐어요. Vercel OPENAI_API_KEY 값을 확인해주세요. (${reason})`;
