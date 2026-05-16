@@ -9,6 +9,15 @@ import { buildPrompt } from '@wi/core/chat';
  */
 export function createClaudeAdapter(apiKey: string): ChatAdapter {
   const client = new Anthropic({ apiKey });
+  // Init-time fingerprint so Vercel runtime logs can quickly tell
+  // "key never reached lambda" (no log line) from "key reached but
+  // Anthropic rejected it" (line present + 401 from .stream()).
+  // Never logs the full key. Real Anthropic keys start with
+  // 'sk-ant-' — leading + trailing snippets surface paste errors
+  // like trailing whitespace or accidental "Bearer " prefix.
+  console.info(
+    `[claude] init len=${apiKey.length} head=${apiKey.slice(0, 8)}… tail=…${apiKey.slice(-4)}`,
+  );
   return {
     id: 'claude',
     async *stream(input: ChatAdapterInput) {
