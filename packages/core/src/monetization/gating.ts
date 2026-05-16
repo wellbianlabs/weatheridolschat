@@ -38,11 +38,12 @@ export function canGenerateImage(input: GateInput): GateResult {
 
 export function canUseFeature(tier: Tier, feature: Feature): GateResult {
   const plan = PLANS[tier];
+  const paid = tier === 'premium' || tier === 'admin';
   switch (feature) {
     case 'unlimited_chat':
-      return tier === 'premium' ? { allowed: true } : { allowed: false, reason: 'tier_required', paywallTrigger: feature };
+      return paid ? { allowed: true } : { allowed: false, reason: 'tier_required', paywallTrigger: feature };
     case 'image_premium':
-      return tier === 'premium' ? { allowed: true } : { allowed: false, reason: 'tier_required', paywallTrigger: feature };
+      return paid ? { allowed: true } : { allowed: false, reason: 'tier_required', paywallTrigger: feature };
     case 'long_memory':
       return plan.longMemory ? { allowed: true } : { allowed: false, reason: 'tier_required', paywallTrigger: feature };
     case 'no_ads':
@@ -50,6 +51,6 @@ export function canUseFeature(tier: Tier, feature: Feature): GateResult {
     case 'video_call':
       return { allowed: false, reason: 'phase_not_ready', paywallTrigger: feature };
     case 'music_gen':
-      return { allowed: false, reason: 'phase_not_ready', paywallTrigger: feature };
+      return plan.musicGen ? { allowed: true } : { allowed: false, reason: 'tier_required', paywallTrigger: feature };
   }
 }

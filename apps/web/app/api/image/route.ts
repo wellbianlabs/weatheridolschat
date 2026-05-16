@@ -4,6 +4,8 @@ import { CHARACTERS } from '@wi/core/characters';
 import { pickImageAdapter } from '@wi/ai';
 import { getCurrentWeather } from '@wi/weather';
 
+import { consumeQuota, quotaHeaders } from '@/lib/quota';
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
@@ -30,6 +32,19 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json(
       { error: { code: 'not_found', message: 'Unknown character' } },
       { status: 404 },
+    );
+  }
+
+  // Quota first — selfies are the most expensive action and we want
+  // to reject before spinning up the image adapter. Admin bypasses.
+  const gate = await consumeQuota({ field: 'selfies' });
+  if (!gate.allowed) {
+    return NextResponse.json(
+      { error: { code: gate.code, message: gate.message } },
+      {
+        status: 429,
+        headers: quotaHeaders(gate, 'selfies'),
+      },
     );
   }
 
@@ -77,7 +92,13 @@ export async function POST(req: Request): Promise<Response> {
         height: result.height,
         weatherCondition: weather.condition,
       },
-      { headers: { 'X-Adapter': adapter.id, 'X-Image-Model': result.model } },
+      {
+        headers: {
+          'X-Adapter': adapter.id,
+          'X-Image-Model': result.model,
+          ...quotaHeaders(gate, 'selfies'),
+        },
+      },
     );
   } catch (err) {
     const msg = (err as Error).message ?? 'unknown';

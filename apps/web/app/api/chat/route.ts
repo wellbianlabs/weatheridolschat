@@ -6,6 +6,7 @@ import { pickProductForCharacter } from '@wi/core/monetization';
 import { runInputSafeguard } from '@wi/core/safeguards';
 import { formatKstLocalTime } from '@wi/core/time';
 
+import { consumeQuota, quotaHeaders, type QuotaResult } from '@/lib/quota';
 import { resolveUser } from '@/lib/supabase/identity';
 import { pickChatAdapter, SYSTEM_PROMPTS } from '@wi/ai';
 import { getCurrentWeather } from '@wi/weather';
@@ -70,10 +71,6 @@ export async function POST(req: Request): Promise<Response> {
   const nickname = (body.nickname ?? '').trim() || '친구';
 
   // ── Identity + tier resolution ────────────────────────────────
-  // Phase 1: read the signed-in user from Supabase. Admin emails
-  // map to tier='admin' which bypasses every quota gate later.
-  // Anonymous visitors fall back to body.tier (defaults to 'free').
-  // Phase 2+ will swap the non-admin tier for a real DB lookup.
   const caller = await resolveUser();
   const tier: 'free' | 'premium' = caller?.isAdmin
     ? 'premium' // admin gets the premium-quality adapter
@@ -82,6 +79,40 @@ export async function POST(req: Request): Promise<Response> {
     console.info(
       `[chat] caller id=${caller.id.slice(0, 8)}… email=${caller.email ?? '-'} tier=${caller.tier}`,
     );
+  }
+
+  // ── Quota check (Phase 2) ─────────────────────────────────────
+  // Charge a message + (if photo attached) a vision turn. Admin is
+  // bypassed inside consumeQuota; anon callers get through without
+  // server-side persistence (client-side soft limit handles that).
+  const msgQuota = await consumeQuota({ field: 'messages', caller });
+  if (!msgQuota.allowed) {
+    return new Response(
+      JSON.stringify({ error: { code: msgQuota.code, message: msgQuota.message } }),
+      {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json',
+          ...quotaHeaders(msgQuota, 'messages'),
+        },
+      },
+    );
+  }
+  let visionQuota: QuotaResult | null = null;
+  if (body.imageDataUrl) {
+    visionQuota = await consumeQuota({ field: 'vision', caller });
+    if (!visionQuota.allowed) {
+      return new Response(
+        JSON.stringify({ error: { code: visionQuota.code, message: visionQuota.message } }),
+        {
+          status: 429,
+          headers: {
+            'Content-Type': 'application/json',
+            ...quotaHeaders(visionQuota, 'vision'),
+          },
+        },
+      );
+    }
   }
 
   // Env-driven configuration. Real keys → live; missing → mock fallback.
@@ -233,6 +264,9 @@ export async function POST(req: Request): Promise<Response> {
       // Tier resolved server-side. Client uses this to show
       // appropriate UI badges (admin / free / premium).
       'X-User-Tier': caller?.tier ?? 'anon',
+      // Live quota state — client renders the remaining badge
+      // straight from these headers, no extra round-trip.
+      ...quotaHeaders(visionQuota ?? msgQuota, visionQuota ? 'vision' : 'messages'),
     },
   });
 }

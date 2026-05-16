@@ -119,6 +119,32 @@ function truncate(s: string | undefined, n: number): string {
 }
 
 /**
+ * Read the X-Quota-* headers an API route may have attached and feed
+ * the parsed values into the chat client's quota state. Header
+ * convention (see lib/quota.ts):
+ *   X-Quota-Field     messages | selfies | songs | tts_chars | vision
+ *   X-Quota-Limit     integer or "inf"
+ *   X-Quota-Used      integer or "inf"
+ *   X-Quota-Remaining integer or "inf"
+ * Only updates state when the field is "messages" — that's the one
+ * the AccountChip displays. Other fields are still emitted by their
+ * routes for future tooltips / paywall trigger logic.
+ */
+function applyQuotaHeaders(
+  headers: Headers,
+  setQuota: (q: { used: number; limit: number | null } | null) => void,
+): void {
+  const field = headers.get('X-Quota-Field');
+  if (field !== 'messages') return; // only the messages chip is exposed for now
+  const usedRaw = headers.get('X-Quota-Used');
+  const limitRaw = headers.get('X-Quota-Limit');
+  if (usedRaw === null) return;
+  const used = usedRaw === 'inf' ? 0 : Number.parseInt(usedRaw, 10) || 0;
+  const limit = limitRaw === 'inf' || !limitRaw ? null : Number.parseInt(limitRaw, 10) || null;
+  setQuota({ used, limit });
+}
+
+/**
  * Downscale + recompress an image File to a JPEG data URL that fits
  * comfortably under the server's 6MB upload cap. Maintains aspect
  * ratio; max dimension `maxEdge`; output quality `quality` (0..1).
@@ -201,10 +227,16 @@ export default function ChatClient({ character }: { character: Character }) {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   // Signed-in account snapshot. Phase 1 just shows the email/admin
-  // badge in the header — quota enforcement uses this in Phase 2+.
+  // badge in the header; Phase 2 layers server quota on top.
   const [account, setAccount] = useState<{ email: string | null; isAdmin: boolean } | null>(
     null,
   );
+  // Server-reported quota for the messages field. Pulled from
+  // X-Quota-* headers on every /api/chat response — Phase 2 makes
+  // these numbers authoritative (replaces the localStorage soft
+  // counter). null = no data yet (e.g. before first send), limit
+  // = null when admin/unlimited.
+  const [quota, setQuota] = useState<{ used: number; limit: number | null } | null>(null);
   // Pending image to send with the next message (from camera/file picker).
   // Held as a data URL so we can both preview it locally and ship it
   // through /api/chat without any extra encoding step.
@@ -685,10 +717,16 @@ export default function ChatClient({ character }: { character: Character }) {
           imageDataUrl: attachedImage ?? undefined,
         }),
       });
-      // Non-2xx responses (e.g. 503 no_vision_provider, 400 validation)
-      // come back as JSON, not SSE. Surface the server's message into
-      // the assistant bubble directly so the user sees what to fix
-      // (which env var to set, etc.) instead of "응답이 비어있어요".
+      // Pull quota state from response headers — every /api/chat
+      // response (success or error) carries them. We trust these
+      // over any client-side counter.
+      applyQuotaHeaders(res.headers, setQuota);
+
+      // Non-2xx responses (e.g. 503 no_vision_provider, 400 validation,
+      // 429 rate_limit) come back as JSON, not SSE. Surface the
+      // server's message into the assistant bubble directly so the
+      // user sees what to fix (which env var to set, etc.) instead
+      // of "응답이 비어있어요".
       if (!res.ok) {
         const errBody = (await res.json().catch(() => ({}))) as {
           error?: { code?: string; message?: string };
@@ -909,7 +947,7 @@ export default function ChatClient({ character }: { character: Character }) {
                 {character.displayName}
               </span>
             </div>
-            <AccountChip account={account} usage={usage} />
+            <AccountChip account={account} quota={quota} fallbackUsage={usage} />
           </div>
           <div className="border-t border-brand-ink/8 bg-brand-paper/50 px-6 py-1.5">
             <span className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
@@ -1839,13 +1877,36 @@ function parseLyrics(raw: string): LyricsSection[] {
  */
 function AccountChip({
   account,
-  usage,
+  quota,
+  fallbackUsage,
 }: {
   account: { email: string | null; isAdmin: boolean } | null;
-  usage: number;
+  /** Server-reported quota for the messages field. Null until the
+   *  first chat round-trip lands, or null forever if the server
+   *  isn't wired up yet (Phase 2 disabled). */
+  quota: { used: number; limit: number | null } | null;
+  /** Phase-1 localStorage counter — used only when `quota` is null
+   *  (e.g. before the first send, or in anon mode where the server
+   *  doesn't meter us). Lets the badge always show *something*. */
+  fallbackUsage: number;
 }) {
   const email = account?.email ?? null;
   const isAdmin = account?.isAdmin ?? false;
+
+  // Pick the most truthful counter we have:
+  //   - admin: always show "오늘 ∞" (no cap)
+  //   - signed-in with server-fed quota: show "N/limit" or "N today" if unlimited
+  //   - else: fall back to client-side counter
+  let counterText: string;
+  if (isAdmin) {
+    counterText = '오늘 ∞';
+  } else if (quota) {
+    if (quota.limit == null) counterText = `오늘 ${quota.used}회`;
+    else counterText = `${quota.used} / ${quota.limit}`;
+  } else {
+    counterText = `오늘 ${fallbackUsage}회`;
+  }
+
   return (
     <div className="flex flex-col items-end gap-0.5">
       {isAdmin ? (
@@ -1880,7 +1941,7 @@ function AccountChip({
         </a>
       )}
       <span className="font-mono text-[9px] uppercase tracking-eyebrow text-brand-ink-soft/70">
-        오늘 {usage}회
+        {counterText}
       </span>
     </div>
   );

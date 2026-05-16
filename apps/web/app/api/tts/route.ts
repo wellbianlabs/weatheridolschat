@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 
 import { type CharacterId } from '@wi/core/characters';
 
+import { consumeQuota, quotaHeaders } from '@/lib/quota';
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
@@ -261,6 +263,23 @@ export async function POST(req: Request): Promise<Response> {
   if (!rawText) return jsonError('validation_error', 'Empty text', 400);
   const text = stripForSpeech(rawText).slice(0, MAX_CHARS);
 
+  // Quota: meter by character count of the *cleaned* text (post-strip).
+  // That matches what Google actually bills us for and gives users a
+  // fair budget — emoji-heavy messages don't eat their TTS quota.
+  const gate = await consumeQuota({ field: 'tts_chars', cost: text.length });
+  if (!gate.allowed) {
+    return new Response(
+      JSON.stringify({ error: { code: gate.code, message: gate.message } }),
+      {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json',
+          ...quotaHeaders(gate, 'tts_chars'),
+        },
+      },
+    );
+  }
+
   const preset =
     (body.characterId && VOICE_PRESETS[body.characterId as CharacterId]) || DEFAULT_VOICE;
   const voice = body.voice ?? preset.voice;
@@ -409,6 +428,7 @@ export async function POST(req: Request): Promise<Response> {
       // Different text → different URL (we hash params via the
       // browser's URL) so collisions are unlikely.
       'Cache-Control': 'private, max-age=3600',
+      ...quotaHeaders(gate, 'tts_chars'),
     },
   });
 }

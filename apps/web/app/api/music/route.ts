@@ -4,6 +4,8 @@ import { CHARACTERS, type CharacterId } from '@wi/core/characters';
 import { generateWeatherSongLyrics, pickMusicAdapter } from '@wi/ai';
 import { getCurrentWeather } from '@wi/weather';
 
+import { consumeQuota, quotaHeaders } from '@/lib/quota';
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
@@ -35,6 +37,21 @@ export async function POST(req: Request): Promise<Response> {
 
   const character = body.characterId ? CHARACTERS[body.characterId] : undefined;
   if (!character) return jsonError('not_found', 'Unknown character', 404);
+
+  // Quota — songs are by far the most expensive action (~$0.50 each
+  // for Suno V4_5). Block before Gemini lyrics + Suno kickoff. Admin
+  // bypasses; anon callers pass through (the Free plan grants 0/day
+  // so they'll get a friendly Korean error here).
+  const gate = await consumeQuota({ field: 'songs' });
+  if (!gate.allowed) {
+    return new Response(
+      JSON.stringify({ error: { code: gate.code, message: gate.message } }),
+      {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', ...quotaHeaders(gate, 'songs') },
+      },
+    );
+  }
 
   const mockMode = process.env.MOCK_MODE !== 'false';
   const sunoApiKey = process.env.SUNO_API_KEY || undefined;
@@ -106,6 +123,7 @@ export async function POST(req: Request): Promise<Response> {
         'X-Provider': adapter.id,
         'X-Provider-Mode': mockMode ? 'mock' : 'live',
         ...(lyricsModel ? { 'X-Lyrics-Model': lyricsModel } : {}),
+        ...quotaHeaders(gate, 'songs'),
       },
     });
   } catch (err) {
