@@ -114,10 +114,12 @@ export function createSunoAdapter(opts: {
 
       // sunoapi.org returns code !== 200 in the envelope on validation
       // failures (insufficient credits, invalid params, etc.) even with
-      // HTTP 200. Surface those clearly.
+      // HTTP 200. Translate the common ones to actionable Korean copy
+      // so the operator/user knows exactly what to fix instead of
+      // staring at a generic "Suno generate failed" line.
       if (json.code != null && json.code !== 200) {
         console.error(`[suno] envelope error code=${json.code} msg=${json.msg ?? ''}`);
-        throw new Error(`Suno generate failed: ${json.msg ?? `code=${json.code}`}`);
+        throw new Error(translateSunoError(json.code, json.msg ?? ''));
       }
 
       const taskId = json.data?.taskId;
@@ -385,4 +387,41 @@ function defaultTitleFor(characterId: string): string {
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
   return s.slice(0, n - 1) + '…';
+}
+
+/**
+ * Map common sunoapi.org error envelopes to actionable Korean copy.
+ *
+ * The original English message is kept in parentheses so an operator
+ * looking at logs/issues can still cross-reference Suno's own docs.
+ * URLs are emitted as bare `https://...` strings — the chat card UI
+ * auto-links them so the user gets a one-tap action.
+ */
+function translateSunoError(code: number, msg: string): string {
+  const m = msg.toLowerCase();
+  if (
+    m.includes('credits are insufficient') ||
+    m.includes('top up') ||
+    m.includes('insufficient credits') ||
+    m.includes('insufficient_credits')
+  ) {
+    return [
+      'Suno 크레딧이 부족해요.',
+      'https://sunoapi.org/dashboard 에서 크레딧을 충전해주세요.',
+      `(원본: ${msg})`,
+    ].join(' ');
+  }
+  if (m.includes('rate limit') || code === 429) {
+    return `Suno 호출 속도 한도에 걸렸어요. 1~2분 후 다시 시도해주세요. (원본: ${msg})`;
+  }
+  if (m.includes('unauthorized') || m.includes('invalid api key') || code === 401) {
+    return `Suno API 키가 거부됐어요. Vercel SUNO_API_KEY 값을 확인해주세요. (원본: ${msg})`;
+  }
+  if (m.includes('content policy') || m.includes('moderation')) {
+    return `Suno 콘텐츠 정책에 막혔어요. 다른 표현으로 다시 부탁해줘. (원본: ${msg})`;
+  }
+  if (m.includes('callbackurl') || m.includes('call back url')) {
+    return `Suno callBackUrl 검증 실패. SUNO_CALLBACK_URL 환경변수를 확인해주세요. (원본: ${msg})`;
+  }
+  return `Suno 호출이 실패했어요. (${msg || `code=${code}`})`;
 }

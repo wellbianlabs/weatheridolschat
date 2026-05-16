@@ -917,7 +917,7 @@ function WeatherSongCard({
           />
         ) : track.status === 'failed' ? (
           <p className="font-sans text-[13px] leading-relaxed text-brand-ink-soft">
-            노래를 만들지 못했어. {track.error ? `(${track.error})` : ''}
+            노래를 만들지 못했어. {track.error ? <Linkified text={track.error} accent={accent} /> : null}
           </p>
         ) : (
           <SongProgress
@@ -1136,6 +1136,51 @@ function AudioPlayer({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Render text with bare `https://...` URLs turned into clickable links.
+ * The error copy from our adapters embeds action URLs (e.g. Suno
+ * billing, OpenAI billing) as plain strings — this lets the user
+ * one-tap to the page that fixes the problem.
+ *
+ * Match is conservative on purpose: only http/https, no trailing
+ * punctuation, max 200 chars. Anything weirder is left as text.
+ */
+function Linkified({ text, accent }: { text: string; accent: string }) {
+  const URL_RE = /(https?:\/\/[^\s)(]{1,200})/g;
+  const parts: Array<{ kind: 'text' | 'link'; value: string }> = [];
+  let last = 0;
+  for (const m of text.matchAll(URL_RE)) {
+    const start = m.index ?? 0;
+    if (start > last) parts.push({ kind: 'text', value: text.slice(last, start) });
+    parts.push({ kind: 'link', value: m[1]! });
+    last = start + m[1]!.length;
+  }
+  if (last < text.length) parts.push({ kind: 'text', value: text.slice(last) });
+
+  return (
+    <>
+      (
+      {parts.map((p, i) =>
+        p.kind === 'link' ? (
+          <a
+            key={i}
+            href={p.value}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2 transition hover:opacity-80"
+            style={{ color: accent }}
+          >
+            {p.value}
+          </a>
+        ) : (
+          <span key={i}>{p.value}</span>
+        ),
+      )}
+      )
+    </>
   );
 }
 
