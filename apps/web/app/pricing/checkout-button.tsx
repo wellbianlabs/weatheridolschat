@@ -4,6 +4,8 @@ import { useState } from 'react';
 
 import type { CreditPackSku, SubscriptionPlanId } from '@wi/core/monetization';
 
+import { getBrowserSupabase } from '@/lib/supabase/browser';
+
 /**
  * Checkout button used by both subscription tiles and credit-pack
  * tiles on /pricing.
@@ -36,11 +38,39 @@ export default function CheckoutButton({
   async function go() {
     setBusy(true);
     setError(null);
+
+    // Belt-and-suspenders: if the client-side SDK is sitting on a
+    // valid session, force a token refresh BEFORE the API call so
+    // the cookie sent in the request is definitely fresh. This
+    // sidesteps the case where the server sees a stale/expired
+    // access token even though the browser thinks it's logged in.
+    try {
+      const supabase = getBrowserSupabase();
+      if (supabase) {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (session) {
+          // Touch refresh — quick if token is still valid, rotates
+          // if it's near expiry. Side-effect: the new cookies
+          // populate document.cookie before the fetch fires.
+          await supabase.auth.refreshSession().catch(() => {
+            /* refresh may fail if there is no refresh_token —
+               we'll see the 401 a second later if so */
+          });
+        }
+      }
+    } catch {
+      /* Pre-flight is best-effort. Continue regardless. */
+    }
+
     try {
       const res = await fetch('/api/payments/checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind, sku, plan }),
+        // credentials: 'include' is the default for same-origin, but
+        // make it explicit so any CDN / browser quirk that turns it
+        // off can't silently strip the auth cookie.
+        credentials: 'include',
       });
       const data = (await res.json()) as {
         checkoutUrl?: string | null;
@@ -49,9 +79,14 @@ export default function CheckoutButton({
       };
       if (!res.ok) {
         if (res.status === 401) {
-          // Bounce to login with return-to so the user comes back
-          // to /pricing to retry after signing in.
-          window.location.href = `/login?next=${encodeURIComponent('/pricing')}`;
+          // Don't hard-redirect anymore. Show the user what happened
+          // and give them a manual login button — auto-bouncing
+          // away made it impossible to diagnose mismatched session
+          // states ("client says logged in / server says anon").
+          setError(
+            '로그인 세션이 만료됐어요. 다시 로그인하거나 페이지를 새로고침해주세요.',
+          );
+          setBusy(false);
           return;
         }
         throw new Error(data.error?.message ?? `HTTP ${res.status}`);
@@ -80,7 +115,21 @@ export default function CheckoutButton({
         {busy ? '결제 페이지 여는 중…' : children}
       </button>
       {error ? (
-        <p className="mt-2 font-mono text-[10px] text-red-500">{error}</p>
+        <div className="mt-2 space-y-1">
+          <p className="font-mono text-[10px] text-red-500">{error}</p>
+          {/* If the failure was an auth one, the error string starts
+              with "로그인 세션…". Offer a one-click recover path so
+              the user isn't stuck on /pricing trying to figure out
+              what to do. */}
+          {error.startsWith('로그인 세션') ? (
+            <a
+              href={`/login?next=${encodeURIComponent('/pricing')}`}
+              className="inline-block font-mono text-[10px] uppercase tracking-eyebrow text-brand-accent underline underline-offset-2"
+            >
+              로그인 페이지로 이동 →
+            </a>
+          ) : null}
+        </div>
       ) : null}
     </div>
   );
