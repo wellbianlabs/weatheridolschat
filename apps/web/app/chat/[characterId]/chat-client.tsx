@@ -83,6 +83,14 @@ interface UIMessage {
    * without it fall back to `Date.now()` at load time.
    */
   createdAt: number;
+  /**
+   * True when `createdAt` was synthesised at load time because the
+   * row predates the createdAt field. The render layer skips the
+   * "오후 X:XX" stamp for legacy messages — showing made-up identical
+   * times across every old bubble was the visible side-effect of
+   * the v1 migration that prompted this fix.
+   */
+  legacyTime?: boolean;
   /** Object URL of a Google TTS-rendered MP3, cached on first 🔊 click.
    *  Reused for replay + download so we don't re-bill the API. */
   ttsUrl?: string;
@@ -273,18 +281,28 @@ function loadHistory(characterId: string): UIMessage[] | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as UIMessage[];
     if (!Array.isArray(parsed)) return null;
-    // Migrate legacy rows that predate the createdAt field. Anchor
-    // them to a single "yesterday" timestamp rather than `Date.now()`
-    // so they don't all collapse into a single fake "right now"
-    // group — KakaoTalk's date divider then puts them under
-    // "어제" which reads correctly for restored history.
-    const yesterday = Date.now() - 24 * 60 * 60 * 1000;
-    return parsed.map((m, i) => ({
-      ...m,
-      // Spread small i-millisecond offsets so the relative order is
-      // preserved when we sort or group by time.
-      createdAt: typeof m.createdAt === 'number' ? m.createdAt : yesterday + i,
-    }));
+    // Migrate legacy rows that predate the createdAt field.
+    //
+    // v1 migration used `yesterday + i` (millisecond offsets) which
+    // formatted to identical hh:mm for every row — the "모든 시간이
+    // 다 똑같아" bug. v2 spreads legacy messages across the prior
+    // day so they sort correctly AND marks them with `legacyTime`
+    // so the render layer can SUPPRESS the timestamp entirely.
+    // Showing the synthesised time would be lying about when the
+    // message was sent; hiding it is the honest behaviour and
+    // leaves the "어제" date divider as the only temporal signal.
+    return parsed.map((m, i) => {
+      if (typeof m.createdAt === 'number') return m;
+      const yesterday = Date.now() - 24 * 60 * 60 * 1000;
+      return {
+        ...m,
+        // 1-minute apart synthetic ordering keeps grouping sensible
+        // (each prior bubble lands in a "different burst") without
+        // ever being shown to the user.
+        createdAt: yesterday + i * 60 * 1000,
+        legacyTime: true,
+      };
+    });
   } catch {
     return null;
   }
@@ -391,7 +409,13 @@ function computeRenderInfo(messages: UIMessage[]): RenderInfo[] {
   // a long pause restarts the group.
   const SAME_GROUP_GAP_MS = 5 * 60 * 1000;
 
-  return messages.map((m, i): RenderInfo => {
+  // Two-pass: first decide group boundaries + raw showTime, then
+  // walk the result to suppress duplicate consecutive "오후 2:35"
+  // labels (same minute appearing on multiple adjacent bubbles).
+  // Empirically this is what made the per-bubble timestamps read
+  // as "모든 시간이 똑같아" — quick back-and-forth lands every
+  // group end in the same minute.
+  const raw = messages.map((m, i) => {
     const prev = i > 0 ? messages[i - 1] : null;
     const next = i < messages.length - 1 ? messages[i + 1] : null;
 
@@ -399,35 +423,59 @@ function computeRenderInfo(messages: UIMessage[]): RenderInfo[] {
     const currDay = kstDayKey(m.createdAt);
     const showDateDivider = !prev || prevDay !== currDay;
 
-    // Same-sender run boundary: changed role, new day, or > gap.
     const isFirstInRun =
       !prev ||
       prev.role !== m.role ||
       prevDay !== currDay ||
       m.createdAt - prev.createdAt > SAME_GROUP_GAP_MS;
 
-    // Sender header (character name) only appears at the top of an
-    // assistant run. User messages never get a header — it's their
-    // own message, they know who sent it.
     const showSenderHeader = m.role === 'assistant' && isFirstInRun;
 
-    // Last in run: next message is from a different sender, or
-    // doesn't exist, or is > gap away, or starts a new day.
     const nextDay = next ? kstDayKey(next.createdAt) : null;
     const isLastInRun =
       !next ||
       next.role !== m.role ||
       currDay !== nextDay ||
       next.createdAt - m.createdAt > SAME_GROUP_GAP_MS;
-    const showTime = isLastInRun;
+
+    // Two hard rules suppress the time stamp before we even check
+    // duplicates:
+    //   1. legacyTime=true → the timestamp is synthesised from a
+    //      pre-createdAt localStorage row. We don't know the real
+    //      time so we don't display one.
+    //   2. pending=true → the assistant bubble is still streaming;
+    //      its "finished at" time isn't meaningful yet.
+    let showTime = isLastInRun && !m.legacyTime && !m.pending;
 
     return {
       showDateDivider,
       showSenderHeader,
       showTime,
       tightTop: !isFirstInRun && !showDateDivider,
+      minuteKey: Math.floor(m.createdAt / 60_000), // for dedup pass
     };
   });
+
+  // Second pass — drop redundant same-minute timestamps.
+  // KakaoTalk's natural read: if the previous shown time is the
+  // same minute as this one, this one is noise. Walk forward and
+  // remember the last minute we actually rendered a time for.
+  let lastShownMinute: number | null = null;
+  return raw.map((r) => {
+    if (!r.showTime) return stripMinuteKey(r);
+    if (lastShownMinute !== null && r.minuteKey === lastShownMinute) {
+      return stripMinuteKey({ ...r, showTime: false });
+    }
+    lastShownMinute = r.minuteKey;
+    return stripMinuteKey(r);
+  });
+}
+
+/** Drop the internal minuteKey field before exposing RenderInfo. */
+function stripMinuteKey(r: RenderInfo & { minuteKey: number }): RenderInfo {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { minuteKey, ...rest } = r;
+  return rest;
 }
 
 export default function ChatClient({ character }: { character: Character }) {
