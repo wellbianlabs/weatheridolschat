@@ -133,6 +133,13 @@ function truncate(s: string | undefined, n: number): string {
  *   ---
  *   …어때, 머리 좀 헝클어졌나?
  *
+ * Same idea for Japanese script — Rain's persona is from Kanazawa,
+ * but the product rule is "Korean only in chat" (see rain.ts 언어
+ * 규칙 block). The prompt is the primary defense; we still strip
+ * any stray hiragana/katakana here so a one-off regression doesn't
+ * surface a Japanese word in front of the user. Hangul + ASCII +
+ * emoji + punctuation are preserved as-is.
+ *
  * This sanitiser strips that noise so users never see a broken
  * image placeholder inside the bubble. Server-side prompt rules are
  * still the primary defense; this is the safety net.
@@ -150,8 +157,22 @@ function sanitizeAssistantText(s: string | undefined): string {
       .replace(/^[ \t]*[-*_]{3,}[ \t]*$/gm, '')
       // Bare placeholder image URLs the model invents
       .replace(/https?:\/\/[^\s)]*(?:placeholder|example\.com|imgur\.com\/placeholder)\S*/gi, '')
+      // Japanese hiragana (U+3040–U+309F) + katakana (U+30A0–U+30FF) +
+      // half-width katakana (U+FF65–U+FF9F). Kanji is intentionally NOT
+      // included — the CJK Unified Ideographs block overlaps with the
+      // Hanja rarely used in Korean, and stripping it risks damaging
+      // legitimate Korean text. Hiragana/katakana are unambiguously
+      // Japanese and safe to remove.
+      .replace(/[぀-ゟ゠-ヿ･-ﾟ]+/g, '')
+      // Strip empty parenthetical groups left over after hiragana
+      // removal — e.g. "폭신하게 ()" or "(폭신하게)" with the JP
+      // original deleted becomes "()" or "( )". Match Latin + fullwidth
+      // parens. The space-or-empty inside `()` covers both cases.
+      .replace(/\(\s*\)|（\s*）/g, '')
       // Collapse 3+ consecutive blank lines down to a single blank.
       .replace(/\n{3,}/g, '\n\n')
+      // Collapse the double-spaces left behind by the strips above.
+      .replace(/[ \t]{2,}/g, ' ')
       .trim()
   );
 }
