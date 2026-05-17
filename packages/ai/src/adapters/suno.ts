@@ -91,41 +91,54 @@ export function createSunoAdapter(opts: {
       );
 
       const t0 = Date.now();
-      const res = await fetch(`${base}/api/v1/generate`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-      });
+      let res: Response;
+      try {
+        res = await fetch(`${base}/api/v1/generate`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        });
+      } catch (err) {
+        // Network failure before we even got an HTTP envelope.
+        const reason = `fetch failed: ${(err as Error).message}`;
+        console.error(`[suno] generate ${reason}`);
+        throw new Error(buildUserFacingMusicError(reason));
+      }
       const text = await res.text();
       if (!res.ok) {
-        console.error(`[suno] HTTP ${res.status} body=${text.slice(0, 300)}`);
-        throw new Error(
-          `Suno generate failed: HTTP ${res.status} ${truncate(text, 200)}`,
-        );
+        const reason = `HTTP ${res.status} body=${truncate(text, 200)}`;
+        console.error(`[suno] generate ${reason}`);
+        throw new Error(buildUserFacingMusicError(`status=${res.status} ${reason}`));
       }
 
       let json: { code?: number; data?: { taskId?: string }; msg?: string };
       try {
         json = JSON.parse(text);
       } catch {
-        console.error(`[suno] non-JSON body: ${text.slice(0, 200)}`);
-        throw new Error(`Suno generate: response was not JSON: ${truncate(text, 150)}`);
+        const reason = `non-JSON body: ${truncate(text, 150)}`;
+        console.error(`[suno] generate ${reason}`);
+        throw new Error(buildUserFacingMusicError(reason));
       }
 
       // sunoapi.org returns code !== 200 in the envelope on validation
       // failures (insufficient credits, invalid params, etc.) even with
-      // HTTP 200. Translate the common ones to actionable Korean copy
-      // so the operator/user knows exactly what to fix instead of
-      // staring at a generic "Suno generate failed" line.
+      // HTTP 200. We classify each common failure for admin logging,
+      // but the *user* sees the same neutral "잠깐 점검 중" copy in
+      // every case — exposing "Suno 크레딧 부족 / dashboard URL" to a
+      // chatting user is confusing (they didn't sign up with Suno) and
+      // bad positioning (looks like the product is broken because we
+      // can't pay our bills).
       if (json.code != null && json.code !== 200) {
-        console.error(`[suno] envelope error code=${json.code} msg=${json.msg ?? ''}`);
-        throw new Error(translateSunoError(json.code, json.msg ?? ''));
+        const reason = `envelope code=${json.code} msg=${json.msg ?? ''}`;
+        console.error(`[suno] generate ${reason}`);
+        throw new Error(buildUserFacingMusicError(reason));
       }
 
       const taskId = json.data?.taskId;
       if (!taskId) {
-        console.error(`[suno] missing taskId envelope=${truncate(text, 200)}`);
-        throw new Error(`Suno generate: missing taskId (${json.msg ?? 'unknown'})`);
+        const reason = `missing taskId envelope=${truncate(text, 200)}`;
+        console.error(`[suno] generate ${reason}`);
+        throw new Error(buildUserFacingMusicError(reason));
       }
       console.info(`[suno] OK taskId=${taskId} ms=${Date.now() - t0}`);
 
@@ -145,20 +158,32 @@ export function createSunoAdapter(opts: {
     async status(taskId: string): Promise<MusicAdapterResult> {
       const url = new URL(`${base}/api/v1/generate/record-info`);
       url.searchParams.set('taskId', taskId);
-      const res = await fetch(url.toString(), { headers });
+      let res: Response;
+      try {
+        res = await fetch(url.toString(), { headers });
+      } catch (err) {
+        const reason = `fetch failed: ${(err as Error).message}`;
+        console.error(`[suno] status ${reason}`);
+        throw new Error(buildUserFacingMusicError(reason));
+      }
       const text = await res.text();
       if (!res.ok) {
-        console.error(`[suno] status HTTP ${res.status} body=${text.slice(0, 200)}`);
-        throw new Error(`Suno status failed: HTTP ${res.status} ${truncate(text, 150)}`);
+        const reason = `HTTP ${res.status} body=${truncate(text, 150)}`;
+        console.error(`[suno] status ${reason}`);
+        throw new Error(buildUserFacingMusicError(`status=${res.status} ${reason}`));
       }
       let json: { code?: number; data?: SunoRecord; msg?: string };
       try {
         json = JSON.parse(text);
       } catch {
-        throw new Error(`Suno status: non-JSON ${truncate(text, 150)}`);
+        const reason = `non-JSON ${truncate(text, 150)}`;
+        console.error(`[suno] status ${reason}`);
+        throw new Error(buildUserFacingMusicError(reason));
       }
       if (json.code != null && json.code !== 200) {
-        throw new Error(`Suno status: ${json.msg ?? `code=${json.code}`}`);
+        const reason = `envelope code=${json.code} msg=${json.msg ?? ''}`;
+        console.error(`[suno] status ${reason}`);
+        throw new Error(buildUserFacingMusicError(reason));
       }
       const r = json.data;
 
@@ -390,38 +415,69 @@ function truncate(s: string, n: number): string {
 }
 
 /**
- * Map common sunoapi.org error envelopes to actionable Korean copy.
+ * Translate any raw Suno failure reason into an ENDUSER-friendly
+ * Korean message.
  *
- * The original English message is kept in parentheses so an operator
- * looking at logs/issues can still cross-reference Suno's own docs.
- * URLs are emitted as bare `https://...` strings — the chat card UI
- * auto-links them so the user gets a one-tap action.
+ * Design choice (mirrors openai-image.ts/buildUserFacingError):
+ * the visible message NEVER leaks the underlying provider name,
+ * billing state, account configuration, or technical status codes.
+ * From the visitor's perspective the cause is always
+ * "서비스가 잠깐 바빠요 / 점검 중이에요" — that's the right level
+ * of detail for a consumer product.
+ *
+ * Three branches keep specific (still non-technical) copy because
+ * the user CAN do something about them:
+ *
+ *   • content policy / moderation → ask user to rephrase
+ *   • rate limit / 429            → "사람이 몰렸어, 곧 다시"
+ *   • network / fetch failed      → "연결이 약해, 곧 다시"
+ *
+ * Everything else (Suno credits exhausted, API key rejected,
+ * callBackUrl invalid, missing taskId, malformed JSON, internal 5xx)
+ * collapses to one neutral "점검 중" message. Admins still diagnose
+ * the real cause via the [suno] error log lines in Vercel runtime
+ * logs.
  */
-function translateSunoError(code: number, msg: string): string {
-  const m = msg.toLowerCase();
+function buildUserFacingMusicError(reason: string): string {
+  const r = reason.toLowerCase();
+  // Content moderation / policy — the user can fix their prompt.
   if (
-    m.includes('credits are insufficient') ||
-    m.includes('top up') ||
-    m.includes('insufficient credits') ||
-    m.includes('insufficient_credits')
+    r.includes('content policy') ||
+    r.includes('moderation') ||
+    r.includes('content_policy')
   ) {
-    return [
-      'Suno 크레딧이 부족해요.',
-      'https://sunoapi.org/dashboard 에서 크레딧을 충전해주세요.',
-      `(원본: ${msg})`,
-    ].join(' ');
+    return '오늘은 그 가사를 만들기 어려워. 다른 분위기로 다시 부탁해줄래?';
   }
-  if (m.includes('rate limit') || code === 429) {
-    return `Suno 호출 속도 한도에 걸렸어요. 1~2분 후 다시 시도해주세요. (원본: ${msg})`;
+  // Rate-limit / too many concurrent requests — retry-soon framing.
+  if (
+    r.includes('status=429') ||
+    r.includes('rate limit') ||
+    r.includes('rate_limit') ||
+    r.includes('too many requests')
+  ) {
+    return '지금 사람이 많이 몰렸어. 1~2분 뒤에 다시 부탁해줘.';
   }
-  if (m.includes('unauthorized') || m.includes('invalid api key') || code === 401) {
-    return `Suno API 키가 거부됐어요. Vercel SUNO_API_KEY 값을 확인해주세요. (원본: ${msg})`;
+  // Network / upstream timeout — same "try again" framing.
+  if (
+    r.includes('fetch failed') ||
+    r.includes('econn') ||
+    r.includes('etimedout') ||
+    r.includes('socket hang up')
+  ) {
+    return '지금 잠깐 연결이 약해. 잠시 후 다시 시도해줄래?';
   }
-  if (m.includes('content policy') || m.includes('moderation')) {
-    return `Suno 콘텐츠 정책에 막혔어요. 다른 표현으로 다시 부탁해줘. (원본: ${msg})`;
-  }
-  if (m.includes('callbackurl') || m.includes('call back url')) {
-    return `Suno callBackUrl 검증 실패. SUNO_CALLBACK_URL 환경변수를 확인해주세요. (원본: ${msg})`;
-  }
-  return `Suno 호출이 실패했어요. (${msg || `code=${code}`})`;
+  // Everything else (insufficient credits, invalid API key, callBackUrl
+  // validation failure, missing taskId, malformed response, 5xx) all
+  // collapse to one generic "scheduled maintenance" framing. Admins
+  // identify the real cause via the [suno] log line.
+  return '지금은 노래를 만들 수 없어. 잠깐 점검 중이라 곧 다시 가능해질 거야.';
+}
+
+/**
+ * Companion for admin/staff debugging — returns the raw provider
+ * error reason. Kept as a pass-through so a future admin-only
+ * response header can surface it without re-deriving the string.
+ */
+export function technicalMusicErrorDetail(reason: string): string {
+  return reason;
 }

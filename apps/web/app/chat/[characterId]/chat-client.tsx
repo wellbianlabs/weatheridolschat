@@ -1518,8 +1518,17 @@ function WeatherSongCard({
             downloadName={`${downloadName}.mp3`}
           />
         ) : track.status === 'failed' ? (
+          // The /api/music error envelope now always carries a complete,
+          // user-ready Korean sentence (see buildUserFacingMusicError in
+          // packages/ai/src/adapters/suno.ts) — render it as-is. We only
+          // fall back to the generic prefix when there's no message at
+          // all (e.g. client-side abort before the server replied).
           <p className="font-sans text-[13px] leading-relaxed text-brand-ink-soft">
-            노래를 만들지 못했어. {track.error ? <Linkified text={track.error} accent={accent} /> : null}
+            {track.error ? (
+              <Linkified text={track.error} accent={accent} />
+            ) : (
+              '노래를 만들지 못했어. 잠시 후 다시 시도해줄래?'
+            )}
           </p>
         ) : (
           <SongProgress
