@@ -6,6 +6,7 @@ import { pickProductForCharacter } from '@wi/core/monetization';
 import { runInputSafeguard } from '@wi/core/safeguards';
 import { buildKstContext, formatKstLocalTime } from '@wi/core/time';
 
+import { getProfileLocation } from '@/lib/profile';
 import { consumeQuota, quotaHeaders, type QuotaResult } from '@/lib/quota';
 import { resolveUser } from '@/lib/supabase/identity';
 import { getServiceSupabase } from '@/lib/supabase/service';
@@ -130,7 +131,21 @@ export async function POST(req: Request): Promise<Response> {
     return streamSingleText(safeguard.replyText);
   }
 
-  const point = body.locationHint ?? { lat: 37.498, lng: 127.028, label: '서울 강남구' };
+  // Location resolution cascade — first hit wins:
+  //   1. `body.locationHint` — explicit per-request override (the
+  //      client can pass this in from a "send my current location"
+  //      flow once that's wired).
+  //   2. The user's saved profile primary location, set during
+  //      /onboarding. Means a signed-in user from 부산 sees their
+  //      own weather without typing anything.
+  //   3. Default 서울 강남구 fallback so anon visitors / users who
+  //      skipped the location step still get a sensible reading.
+  let point = body.locationHint as { lat: number; lng: number; label?: string } | undefined;
+  if (!point && caller) {
+    const saved = await getProfileLocation(caller.id);
+    if (saved) point = saved;
+  }
+  if (!point) point = { lat: 37.498, lng: 127.028, label: '서울 강남구' };
   const weather = await getCurrentWeather(point, {
     mockMode,
     kweatherApiKey,

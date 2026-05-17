@@ -4,7 +4,9 @@ import { CHARACTERS, type CharacterId } from '@wi/core/characters';
 import { generateWeatherSongLyrics, pickMusicAdapter } from '@wi/ai';
 import { getCurrentWeather } from '@wi/weather';
 
+import { getProfileLocation } from '@/lib/profile';
 import { consumeQuota, quotaHeaders } from '@/lib/quota';
+import { resolveUser } from '@/lib/supabase/identity';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -60,7 +62,17 @@ export async function POST(req: Request): Promise<Response> {
   const openWeatherMapApiKey = process.env.OPENWEATHERMAP_API_KEY || undefined;
   const kweatherApiKey = process.env.KW_API_KEY || process.env.KWEATHER_API_KEY || undefined;
 
-  const point = body.locationHint ?? { lat: 37.498, lng: 127.028, label: '서울 강남구' };
+  // Match the chat / image routes: explicit hint → saved profile
+  // location → 강남구 default. The Gemini-generated lyrics reference
+  // local weather (rain/cold/sunshine), so a user in Busan should
+  // hear their own city's mood in the song, not Seoul's.
+  const caller = await resolveUser();
+  let point = body.locationHint as { lat: number; lng: number; label?: string } | undefined;
+  if (!point && caller) {
+    const saved = await getProfileLocation(caller.id);
+    if (saved) point = saved;
+  }
+  if (!point) point = { lat: 37.498, lng: 127.028, label: '서울 강남구' };
   const weather = await getCurrentWeather(point, {
     mockMode,
     kweatherApiKey,

@@ -4,7 +4,9 @@ import { CHARACTERS } from '@wi/core/characters';
 import { pickImageAdapter } from '@wi/ai';
 import { getCurrentWeather } from '@wi/weather';
 
+import { getProfileLocation } from '@/lib/profile';
 import { consumeQuota, quotaHeaders } from '@/lib/quota';
+import { resolveUser } from '@/lib/supabase/identity';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -53,7 +55,17 @@ export async function POST(req: Request): Promise<Response> {
   const openWeatherMapApiKey = process.env.OPENWEATHERMAP_API_KEY || undefined;
   const kweatherApiKey = process.env.KW_API_KEY || process.env.KWEATHER_API_KEY || undefined;
 
-  const point = body.locationHint ?? { lat: 37.498, lng: 127.028, label: '서울 강남구' };
+  // Same cascade as the chat route: explicit hint → saved profile
+  // location → 강남구 default. Selfie scenes track the user's actual
+  // weather so the lighting/clothing in the generated image matches
+  // what's outside *their* window, not Gangnam's.
+  const caller = await resolveUser();
+  let point = body.locationHint as { lat: number; lng: number; label?: string } | undefined;
+  if (!point && caller) {
+    const saved = await getProfileLocation(caller.id);
+    if (saved) point = saved;
+  }
+  if (!point) point = { lat: 37.498, lng: 127.028, label: '서울 강남구' };
   const weather = await getCurrentWeather(point, {
     mockMode,
     kweatherApiKey,
