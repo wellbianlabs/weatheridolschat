@@ -39,7 +39,7 @@ Supabase OAuth 콜백. 쿠키 세션 설정 (웹 전용).
 ```json
 {
   "id": "uuid",
-  "nickname": "창민",
+  "nickname": "웨더보이",
   "tier": "free",
   "locale": "ko",
   "timezone": "Asia/Seoul",
@@ -53,7 +53,7 @@ Supabase OAuth 콜백. 쿠키 세션 설정 (웹 전용).
 ### `PATCH /api/me`
 **요청:**
 ```json
-{ "nickname": "창민", "locale": "ko", "primaryLocation": { "lat": 37.5, "lng": 127.0 } }
+{ "nickname": "웨더보이", "locale": "ko", "primaryLocation": { "lat": 37.5, "lng": 127.0 } }
 ```
 
 ### `POST /api/me/onboarding`

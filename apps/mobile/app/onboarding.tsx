@@ -39,7 +39,7 @@ export default function OnboardingScreen() {
           autoFocus
           value={nickname}
           onChangeText={setNickname}
-          placeholder="예: 창민"
+          placeholder="예: 웨더보이"
           maxLength={20}
           className="mt-8 rounded-lg border bg-white px-4 py-3 text-lg"
           returnKeyType="done"

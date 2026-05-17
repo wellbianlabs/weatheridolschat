@@ -49,7 +49,7 @@ export default function OnboardingPage() {
             autoFocus
             value={nickname}
             onChange={(e) => setNickname(e.target.value)}
-            placeholder="예: 창민"
+            placeholder="예: 웨더보이"
             maxLength={20}
             className="w-full border-b-2 border-brand-ink/15 bg-transparent pb-3 font-display text-4xl font-medium text-brand-ink outline-none transition focus:border-brand-accent"
             onKeyDown={(e) => {
