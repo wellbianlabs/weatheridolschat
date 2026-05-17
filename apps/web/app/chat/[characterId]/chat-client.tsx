@@ -500,14 +500,58 @@ export default function ChatClient({ character }: { character: Character }) {
     if (!sending) inputRef.current?.focus({ preventScroll: true });
   }, [sending]);
 
+  // Fetch the weather snapshot shown in the chat header.
+  //
+  // Location resolution (in priority order):
+  //   1. localStorage `wi.location` — set by /onboarding when the
+  //      user picks a 시/도→구/군→동 combo. Hot-cache so the header
+  //      reflects the chosen city on the very first paint, with no
+  //      DB round-trip.
+  //   2. Server-side fallback inside /api/weather — when no `lat`/
+  //      `lng` query is passed, the endpoint reads the signed-in
+  //      user's profile.primary_lat/lng. So even if localStorage is
+  //      cleared (private browsing, different device), the header
+  //      still shows the user's saved city.
+  //   3. 강남구 default — anon visitors who haven't onboarded.
+  //
+  // Previously this useEffect hard-coded 강남구 every time, so a user
+  // who picked 부산 해운대 in onboarding still saw 강남구 weather at
+  // the top of every chat — the "매칭이 안 되고 있음" bug.
   useEffect(() => {
     let alive = true;
-    fetch('/api/weather?lat=37.498&lng=127.028&label=서울 강남구')
+
+    // Try localStorage first — synchronous, gives us the right city
+    // on first paint when the user has onboarded.
+    let qs = '';
+    try {
+      const raw = typeof window !== 'undefined' ? localStorage.getItem('wi.location') : null;
+      if (raw) {
+        const saved = JSON.parse(raw) as { lat?: number; lng?: number; label?: string };
+        if (
+          typeof saved.lat === 'number' &&
+          typeof saved.lng === 'number' &&
+          Number.isFinite(saved.lat) &&
+          Number.isFinite(saved.lng)
+        ) {
+          const params = new URLSearchParams({
+            lat: String(saved.lat),
+            lng: String(saved.lng),
+          });
+          if (saved.label) params.set('label', saved.label);
+          qs = `?${params.toString()}`;
+        }
+      }
+    } catch {
+      /* malformed JSON in localStorage — fall through to server cascade */
+    }
+
+    fetch(`/api/weather${qs}`)
       .then((r) => r.json())
       .then((w: WeatherSnapshot) => {
         if (alive) setWeather(w);
       })
       .catch(() => {});
+
     return () => {
       alive = false;
     };
@@ -892,6 +936,30 @@ export default function ChatClient({ character }: { character: Character }) {
     let songIntentTriggered = false;
     let productCard: ProductPayload | null = null;
 
+    // Read the user's onboarding-saved location from localStorage and
+    // ship it as `locationHint` on every chat turn. The server-side
+    // route prefers this over the profile fallback, which keeps the
+    // chat reply tied to the same city the header is showing — vs.
+    // the edge case where the user has multiple devices and one of
+    // them has stale localStorage.
+    let locationHint: { lat: number; lng: number; label?: string } | undefined;
+    try {
+      const raw = localStorage.getItem('wi.location');
+      if (raw) {
+        const saved = JSON.parse(raw) as { lat?: number; lng?: number; label?: string };
+        if (
+          typeof saved.lat === 'number' &&
+          typeof saved.lng === 'number' &&
+          Number.isFinite(saved.lat) &&
+          Number.isFinite(saved.lng)
+        ) {
+          locationHint = { lat: saved.lat, lng: saved.lng, label: saved.label };
+        }
+      }
+    } catch {
+      /* fall through — server cascade still picks up profile location */
+    }
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -901,6 +969,7 @@ export default function ChatClient({ character }: { character: Character }) {
           text,
           nickname,
           imageDataUrl: attachedImage ?? undefined,
+          locationHint,
         }),
       });
       // Pull quota state from response headers — every /api/chat
