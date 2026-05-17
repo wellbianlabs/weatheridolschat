@@ -10,6 +10,7 @@ import {
 import { Eyebrow } from '@wi/ui/web';
 
 import HeaderNav from '@/components/HeaderNav';
+import { resolveUser } from '@/lib/supabase/identity';
 
 import CheckoutButton from './checkout-button';
 
@@ -25,8 +26,15 @@ export const dynamic = 'force-dynamic';
  * Numbers are pulled from PLANS + CREDIT_PACKAGES in
  * @wi/core/monetization so the page can't drift out of sync with
  * the server-side limits and prices.
+ *
+ * Auth-aware CTAs: the Free card's button changes depending on
+ * whether the visitor is signed in — anon users get "무료로 시작"
+ * → /login (so they can sign up), but already-signed-in users get
+ * "채팅 시작하기" → /characters. Previously the button was
+ * hard-coded to /login which kicked logged-in users back to a
+ * confusing "do you want to sign in?" page they didn't ask for.
  */
-export default function PricingPage({
+export default async function PricingPage({
   searchParams,
 }: {
   searchParams: { error?: string };
@@ -34,6 +42,8 @@ export default function PricingPage({
   const free = PLANS.free;
   const premium = PLANS.premium;
   const errorMessage = decodeError(searchParams.error);
+  const user = await resolveUser();
+  const loggedIn = !!user;
 
   const fmt = (n: number) => (Number.isFinite(n) ? n.toLocaleString() : '∞');
 
@@ -74,10 +84,10 @@ export default function PricingPage({
             <li className="text-brand-ink-soft">· 날씨송 (Premium 또는 크레딧 전용)</li>
           </ul>
           <Link
-            href="/login"
+            href={loggedIn ? '/characters' : '/login'}
             className="mt-6 flex h-11 items-center justify-center rounded-full border border-brand-ink/15 bg-white font-sans text-[14px] font-medium text-brand-ink transition hover:border-brand-ink/30"
           >
-            무료로 시작
+            {loggedIn ? '채팅 시작하기' : '무료로 시작'}
           </Link>
         </article>
 
