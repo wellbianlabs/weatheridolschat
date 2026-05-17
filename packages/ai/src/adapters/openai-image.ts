@@ -273,46 +273,53 @@ function describeOpenAIError(err: unknown): string {
 }
 
 /**
- * Translate raw OpenAI error reasons into actionable Korean messages.
- * Each branch tells the operator/user exactly what to fix — vague errors
- * are useless when the feature is broken in production.
+ * Translate raw OpenAI error reasons into ENDUSER-friendly Korean
+ * messages.
+ *
+ * Design choice: the user-facing message NEVER leaks the underlying
+ * provider name, billing state, account configuration, or technical
+ * status codes. From the visitor's perspective the cause is always
+ * "서비스가 잠깐 바빠요 / 점검 중이에요" — that's the right level of
+ * detail for a consumer product. Admins / operators still see the
+ * full raw reason via the [oai-image] error log line in Vercel
+ * runtime logs (and via `technicalImageErrorDetail()` if a future
+ * admin-only response header is wired).
+ *
+ * Keeping the failure modes distinguishable internally is important
+ * for debugging, but exposing "OpenAI 결제 한도 도달" to a regular
+ * user is both confusing (they didn't sign up with OpenAI) and bad
+ * positioning (looks like our service is broken because we can't
+ * pay our bills). Generic "잠시 후 다시" is the safer copy.
  */
-function buildUserFacingError(reason: string, characterId: string): string {
+function buildUserFacingError(reason: string, _characterId: string): string {
   const r = reason.toLowerCase();
-  if (r.includes('must be verified') || r.includes('organization must be verified')) {
-    return [
-      `${characterId} 셀카 생성을 위해 OpenAI 조직 인증이 필요해요.`,
-      'platform.openai.com/settings/organization/general → Verify Organization 에서',
-      '신분증으로 인증을 완료하면 gpt-image-1 이미지 편집이 활성화됩니다.',
-      `(원본: ${reason})`,
-    ].join(' ');
-  }
-  if (r.includes('billing_hard_limit_reached') || r.includes('billing_limit')) {
-    return [
-      'OpenAI 계정의 결제 한도(hard limit)에 도달했어요.',
-      'platform.openai.com/settings/organization/billing/limits 에서',
-      'Usage limit을 올리거나 크레딧을 충전해주세요.',
-      `(원본: ${reason})`,
-    ].join(' ');
-  }
-  if (r.includes('insufficient_quota')) {
-    return [
-      'OpenAI 크레딧이 부족해요.',
-      'platform.openai.com/settings/organization/billing 에서 크레딧을 충전해주세요.',
-      `(원본: ${reason})`,
-    ].join(' ');
-  }
-  if (r.includes('status=429') || r.includes('rate_limit') || r.includes('quota')) {
-    return `OpenAI 호출 속도 한도에 걸렸어요. 1~2분 후 다시 시도해주세요. (${reason})`;
-  }
-  if (r.includes('status=401') || r.includes('invalid_api_key')) {
-    return `OpenAI API 키가 거부됐어요. Vercel OPENAI_API_KEY 값을 확인해주세요. (${reason})`;
-  }
+  // Content policy is the one case where the visible message *should*
+  // tell the user to change THEIR input — anything else they tried
+  // to do here is fine and they should just retry.
   if (r.includes('status=400') && r.includes('content_policy')) {
-    return `이미지 생성이 OpenAI 콘텐츠 정책에 막혔어요. 다른 표현으로 다시 부탁해줘. (${reason})`;
+    return '오늘은 그 사진을 만들기 어려워. 다른 분위기로 다시 부탁해줄래?';
   }
+  // Rate-limit hint — tells the user retrying soon will work,
+  // without exposing the per-account quota structure.
+  if (r.includes('status=429') || r.includes('rate_limit') || r.includes('quota')) {
+    return '지금 사람이 많이 몰렸어. 1~2분 뒤에 다시 부탁해줘.';
+  }
+  // Network / upstream timeout — same "try again" framing.
   if (r.includes('fetch failed') || r.includes('econn') || r.includes('etimedout')) {
-    return `OpenAI에 연결하지 못했어요. 잠시 후 다시 시도해주세요. (${reason})`;
+    return '지금 잠깐 연결이 약해. 잠시 후 다시 시도해줄래?';
   }
-  return `셀카 생성에 실패했어요. (${reason})`;
+  // Everything else (billing limit, org-verify pending, auth key
+  // rejection, model not found, internal 5xx) all collapse to one
+  // generic "scheduled maintenance" framing. Admins identify the
+  // real cause via the [oai-image] log line.
+  return '지금은 사진을 만들 수 없어. 잠깐 점검 중이라 곧 다시 가능해질 거야.';
+}
+
+/**
+ * Companion for admin/staff debugging — returns the raw provider
+ * error message. The /api/image route attaches this to a separate
+ * response header that only the admin chat client surfaces.
+ */
+export function technicalImageErrorDetail(reason: string): string {
+  return reason;
 }
