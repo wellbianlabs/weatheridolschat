@@ -119,6 +119,44 @@ function truncate(s: string | undefined, n: number): string {
 }
 
 /**
+ * Belt-and-suspenders cleanup for assistant text.
+ *
+ * The character system prompts explicitly tell the LLM never to emit
+ * markdown image syntax, HTML img tags, or placeholder URLs in its
+ * response — the system attaches the real asset (selfie / song)
+ * separately as its own bubble. But LLMs occasionally regress and
+ * hallucinate something like:
+ *
+ *   잠깐, 찍어볼게 ☀️
+ *   ---
+ *   ![레인 셀카](https://i.imgur.com/placeholder.jpg)
+ *   ---
+ *   …어때, 머리 좀 헝클어졌나?
+ *
+ * This sanitiser strips that noise so users never see a broken
+ * image placeholder inside the bubble. Server-side prompt rules are
+ * still the primary defense; this is the safety net.
+ */
+function sanitizeAssistantText(s: string | undefined): string {
+  if (!s) return '';
+  return (
+    s
+      // Markdown image syntax: ![alt](url)
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      // HTML img tags
+      .replace(/<img\b[^>]*>/gi, '')
+      // Markdown horizontal rules on their own lines (used as visual
+      // dividers around fake images)
+      .replace(/^[ \t]*[-*_]{3,}[ \t]*$/gm, '')
+      // Bare placeholder image URLs the model invents
+      .replace(/https?:\/\/[^\s)]*(?:placeholder|example\.com|imgur\.com\/placeholder)\S*/gi, '')
+      // Collapse 3+ consecutive blank lines down to a single blank.
+      .replace(/\n{3,}/g, '\n\n')
+      .trim()
+  );
+}
+
+/**
  * Read the X-Quota-* headers an API route may have attached and feed
  * the parsed values into the chat client's quota state. Header
  * convention (see lib/quota.ts):
@@ -1227,6 +1265,12 @@ function ChatBubble({
   }
   const streaming = message.pending && !!message.content;
   const ttsFilename = `${message.id.slice(0, 8)}.mp3`;
+  // Safety net: strip any markdown image / HTML img / placeholder
+  // URLs / standalone hr lines the LLM might emit despite the
+  // system-prompt rules. Server-side prompt is the primary defense;
+  // this is the second line so the user never sees a fake
+  // !\[](https://...) inline.
+  const displayContent = sanitizeAssistantText(message.content);
   return (
     <div
       className="max-w-[80%] cursor-pointer rounded-2xl bg-white px-4 py-2.5 font-sans text-[15px] leading-relaxed text-brand-ink shadow-xs"
@@ -1236,7 +1280,7 @@ function ChatBubble({
         <TypingDots accent={accentColor} />
       ) : (
         <>
-          {message.content || ' '}
+          {displayContent || ' '}
           {streaming ? (
             <span
               aria-hidden
@@ -1315,7 +1359,7 @@ function ChatBubble({
             className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
             onClick={(e) => {
               e.stopPropagation();
-              void navigator.clipboard?.writeText(message.content ?? '');
+              void navigator.clipboard?.writeText(sanitizeAssistantText(message.content) ?? '');
               setOpen(false);
             }}
           >
