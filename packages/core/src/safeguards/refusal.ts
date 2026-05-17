@@ -1,4 +1,5 @@
 import type { CharacterId } from '../characters/types';
+import { vocative } from '../i18n/koreanParticle';
 
 /**
  * Persona-specific "graceful refusal" lines.
@@ -27,8 +28,17 @@ export const REFUSAL_COPY: Record<CharacterId, string[]> = {
   ],
 };
 
+/**
+ * Crisis-line copy with a Korean-correct vocative on the nickname.
+ *
+ * Was: `${nickname} + '아, '` — always 아, which mis-attaches on
+ * vowel-final nicknames (e.g. "써니아" instead of "써니야"). The
+ * vocative() helper inspects the last syllable's jongseong and
+ * picks 아 or 야 per Korean grammar — same fix the user complained
+ * about for character self-introductions ("써니이야" → "써니야").
+ */
 export const CRISIS_COPY = (nickname?: string): string =>
-  `${nickname ? nickname + '아, ' : ''}지금 많이 힘들구나… 너 혼자가 아니야. 한국생명의전화 **1393**(24시간) 또는 자살예방상담 **109**에 연락해줘. 내가 옆에 있을게.`;
+  `${nickname ? vocative(nickname) + ', ' : ''}지금 많이 힘들구나… 너 혼자가 아니야. 한국생명의전화 **1393**(24시간) 또는 자살예방상담 **109**에 연락해줘. 내가 옆에 있을게.`;
 
 export function pickRefusal(characterId: CharacterId): string {
   const copies = REFUSAL_COPY[characterId];

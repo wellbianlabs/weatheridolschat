@@ -134,13 +134,66 @@ const PRODUCT_DISCIPLINE = `
 사용자가 찾을 때만, 한 가지만, 자연스럽게.`;
 
 /**
- * Compose the final system prompt: persona + multimodal contract +
- * product-discipline rules. Persona stays unique per character;
- * the contracts are shared so the four characters can't drift
- * independently into pushy / sycophantic patterns.
+ * Korean particle / vocative discipline.
+ *
+ * The single most-noticeable foreign-feeling bug a Korean LLM
+ * generates is wrong particle attachment — most famously "써니이야"
+ * instead of "써니야" when the character introduces itself. Korean
+ * has a strict consonant-vs-vowel-final (받침) rule that English-
+ * trained models routinely flub.
+ *
+ * We don't have a deterministic way to coerce the model's free-form
+ * output from code, but giving it the *exact* correct forms for
+ * each character name dramatically reduces the error rate. The
+ * per-character block below is paired with vocative()/copulaCasual()
+ * helpers in @wi/core/i18n for any code-generated copy that
+ * substitutes runtime names.
+ *
+ * The character-specific particle tables vary per name. To keep
+ * this central rule generic enough to inject everywhere AND
+ * specific enough to be actionable, we put the universal Korean
+ * rule here and let each character file specify its own forms in
+ * a "## 호격·조사" section.
  */
+const KOREAN_PARTICLE_DISCIPLINE = `
+
+## 🇰🇷 한국어 조사·호격 (자주 틀리는 부분 — 반드시 체크)
+
+한국어 조사는 앞 단어의 마지막 음절이 받침이 있느냐 없느냐로 갈립니다.
+영어 학습 비중이 높은 모델은 이 규칙을 자주 어기는데, 채팅에서 가장 어색하게
+느껴지는 오류 중 하나이니 반드시 정확히 쓰세요.
+
+| 상황       | 받침 있음(자음 끝)   | 받침 없음(모음 끝) |
+| ---------- | -------------------- | ------------------ |
+| 부를 때    | -아 (정민아)         | -야 (써니야)       |
+| ~이다 반말 | -이야 (레인이야)     | -야 (써니야)       |
+| 주격       | -이 (레인이)         | -가 (써니가)       |
+| 보조사     | -은 (레인은)         | -는 (써니는)       |
+| 목적격     | -을 (레인을)         | -를 (써니를)       |
+| ~과/~와    | -과 (레인과)         | -와 (써니와)       |
+
+❌ 절대 금지 (가장 흔한 실수):
+  - "써니이야" ❌  →  "써니야" ✅ (자기소개)
+  - "써니이" ❌  →  "써니가" ✅ (주격)
+  - "클라우디이야" ❌  →  "클라우디야" ✅
+  - "썬더이야" ❌  →  "썬더야" ✅
+  - "레인야" ❌  →  "레인이야" ✅
+  - "레인가" ❌  →  "레인이" ✅
+
+사용자 닉네임을 부를 때도 동일 규칙입니다.
+모음으로 끝나는 닉네임 (예: 미나, 유나, 써니, 보이) → "미나야", "유나야", "보이야"
+자음으로 끝나는 닉네임 (예: 정민, 수민, 영준) → "정민아", "수민아", "영준아"`;
+
+/**
+ * Compose the final system prompt: persona + multimodal contract +
+ * product-discipline rules + Korean particle discipline. Persona
+ * stays unique per character; the contracts are shared so the four
+ * characters can't drift independently into pushy / sycophantic /
+ * grammatically-off patterns.
+ */
+
 function withCapabilities(persona: string): string {
-  return `${persona.trim()}\n${MULTIMODAL_CAPABILITIES}\n${PRODUCT_DISCIPLINE}`;
+  return `${persona.trim()}\n${MULTIMODAL_CAPABILITIES}\n${PRODUCT_DISCIPLINE}\n${KOREAN_PARTICLE_DISCIPLINE}`;
 }
 
 export const SYSTEM_PROMPTS: Record<CharacterId, string> = {

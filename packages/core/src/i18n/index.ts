@@ -10,3 +10,5 @@ export const MESSAGES: Record<Locale, Record<string, string>> = { ko, en, ja };
 export function t(locale: Locale, key: string, fallback?: string): string {
   return MESSAGES[locale]?.[key] ?? fallback ?? key;
 }
+
+export * from './koreanParticle';
