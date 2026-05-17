@@ -90,6 +90,17 @@ export default function HeaderNav({
         <Link href="/pricing" className={`${linkClassMuted} hidden sm:inline-flex`}>
           Pricing
         </Link>
+        {account?.isAdmin ? (
+          // Admin-only entry — sits between Pricing and the Account
+          // chip so it's discoverable without being prominent for a
+          // typical user (they never see it).
+          <Link
+            href="/admin"
+            className="inline-flex items-center justify-center h-9 px-3 rounded-full bg-red-500/10 font-mono text-[10px] uppercase tracking-eyebrow text-red-600 hover:bg-red-500/15 transition-colors"
+          >
+            ★ Admin
+          </Link>
+        ) : null}
         {loggedIn ? (
           <Link href="/account" className="ml-1 flex items-center gap-1.5 px-2">
             {account?.isAdmin ? (
