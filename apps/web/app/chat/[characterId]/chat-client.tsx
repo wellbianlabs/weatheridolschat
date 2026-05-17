@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import type { Character } from '@wi/core/characters';
+import type { Character, CharacterId } from '@wi/core/characters';
 import type { ProductPayload } from '@wi/core/chat';
 import { kstDateString } from '@wi/core/time';
 import type { WeatherSnapshot } from '@wi/core/weather';
@@ -11,6 +11,8 @@ import { Button, Chip, Eyebrow } from '@wi/ui/web';
 
 import WeatherBackground from '@/components/WeatherBackground';
 import { getBrowserSupabase } from '@/lib/supabase/browser';
+
+import { buildWelcomeGreeting } from './welcome';
 
 /**
  * Minimal subset of the Web Speech API surface we use. The actual
@@ -275,12 +277,20 @@ function saveHistory(characterId: string, messages: UIMessage[]) {
 
 export default function ChatClient({ character }: { character: Character }) {
   const [nickname, setNickname] = useState<string>('친구');
-  const [messages, setMessages] = useState<UIMessage[]>([
+  // Welcome bubble: per-character × time-of-day variants picked once
+  // on mount (useState initialiser, not on every render). See
+  // ./welcome.ts for the full table and rationale. We deliberately
+  // pick at mount rather than on every visit-to-this-tab so a user
+  // glancing back doesn't see the line shuffle under them.
+  const [messages, setMessages] = useState<UIMessage[]>(() => [
     {
       id: 'welcome',
       role: 'assistant',
       kind: 'text',
-      content: `안녕, 나는 ${character.displayName}이야. 첫인사 보내봐.`,
+      content: buildWelcomeGreeting(
+        character.id as CharacterId,
+        character.displayName,
+      ),
     },
   ]);
   const [input, setInput] = useState('');
