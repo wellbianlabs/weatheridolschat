@@ -13,7 +13,12 @@ const colors = {
     'paper-sky': '#E6F0FB',
     'paper-lilac': '#F0E8FB',
     ink: '#241B3E',
-    'ink-soft': '#5E5478',
+    // ink-soft is for secondary text. Was #5E5478 (lighter purple) but
+    // at small sizes (10-11px eyebrow chips) on the cream paper bg
+    // it read as washed out. Darker mix bumps contrast to ~7.5:1 vs
+    // the prior ~5.8:1 — still distinct from primary ink but legible
+    // at micro sizes without losing the "soft" feel.
+    'ink-soft': '#4A4068',
     chrome: '#E7DDF0',
   },
   sunny: {
@@ -61,10 +66,52 @@ module.exports = {
         '3xl': '28px',
       },
       fontFamily: {
-        display: ['Playfair Display', 'Pretendard Variable', 'Georgia', 'serif'],
-        sans: ['Inter', 'Pretendard Variable', 'system-ui', 'sans-serif'],
-        serif: ['Playfair Display', 'Pretendard Variable', 'Georgia', 'serif'],
-        mono: ['JetBrains Mono', 'ui-monospace', 'monospace'],
+        // Korean readability is the top priority. The browser picks
+        // per-glyph: Hangul characters hit Noto Sans KR first
+        // (loaded via next/font in apps/web/app/layout.tsx), Latin
+        // hits Inter, and only failures cascade to system-ui. The
+        // old chain listed "Pretendard Variable" without actually
+        // loading it, so Hangul fell through to Linux's Liberation
+        // Sans on Vercel — visibly thin and grey. With Noto loaded
+        // the same characters render crisp.
+        display: [
+          'Playfair Display',
+          'var(--font-sans-kr)',
+          'Pretendard Variable',
+          'Georgia',
+          'serif',
+        ],
+        sans: [
+          'var(--font-sans-kr)',
+          'Inter',
+          'Pretendard Variable',
+          'system-ui',
+          'sans-serif',
+        ],
+        serif: [
+          'Playfair Display',
+          'var(--font-sans-kr)',
+          'Pretendard Variable',
+          'Georgia',
+          'serif',
+        ],
+        // Mono stays Latin-only; Korean inside `<code>` blocks falls
+        // through to Noto Sans KR for legibility (better than
+        // forcing JetBrains Mono's Latin glyphs onto Hangul).
+        mono: ['JetBrains Mono', 'var(--font-sans-kr)', 'ui-monospace', 'monospace'],
+      },
+      // Korean glyphs read narrower than Latin at the same px size,
+      // so default `text-xs` (12px) is the practical floor for body
+      // copy. Anything smaller becomes a UI label only, never a
+      // sentence. The chip ramps below are slightly larger than
+      // Tailwind defaults specifically to lift the 9-11px eyebrow
+      // band off the legibility cliff.
+      fontSize: {
+        // Custom micro-label scale used by chips / eyebrows.
+        chip: ['11px', { lineHeight: '14px', letterSpacing: '0.08em' }],
+        // 13px = tightest body text we ever ship. Anything finer is
+        // a chip, not body.
+        micro: ['13px', { lineHeight: '18px' }],
       },
       boxShadow: {
         xs: '0 1px 2px rgba(36,27,62,0.04)',
@@ -83,7 +130,12 @@ module.exports = {
       },
       letterSpacing: {
         tightest: '-0.025em',
-        eyebrow: '0.18em',
+        // Eyebrow spacing: was 0.18em which on 9-10px Hangul looked
+        // like floating disconnected syllables. 0.10em keeps the
+        // editorial "small-caps" feel without breaking the word
+        // gestalt. Korean characters in particular need tighter
+        // tracking than Latin — they're already perceptually wide.
+        eyebrow: '0.10em',
       },
       keyframes: {
         'fade-up': {

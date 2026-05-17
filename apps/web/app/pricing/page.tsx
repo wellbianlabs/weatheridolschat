@@ -93,7 +93,7 @@ export default async function PricingPage({
 
         {/* Premium */}
         <article className="relative overflow-hidden rounded-3xl border-2 border-brand-accent bg-white p-6">
-          <span className="absolute right-4 top-4 rounded-full bg-brand-accent/15 px-2 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-brand-accent">
+          <span className="absolute right-4 top-4 rounded-full bg-brand-accent/15 px-2 py-0.5 font-mono text-[11px] uppercase tracking-eyebrow text-brand-accent">
             추천
           </span>
           <div className="font-mono text-[10px] uppercase tracking-eyebrow text-brand-accent">

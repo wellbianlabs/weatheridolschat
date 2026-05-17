@@ -27,18 +27,18 @@ export default async function AccountPage({
   const tierBadge = (() => {
     if (user.isAdmin)
       return (
-        <span className="rounded-full bg-red-500/15 px-2 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-red-600">
+        <span className="rounded-full bg-red-500/15 px-2 py-0.5 font-mono text-[11px] uppercase tracking-eyebrow text-red-600">
           ★ Admin
         </span>
       );
     if (sub)
       return (
-        <span className="rounded-full bg-brand-accent/15 px-2 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-brand-accent">
+        <span className="rounded-full bg-brand-accent/15 px-2 py-0.5 font-mono text-[11px] uppercase tracking-eyebrow text-brand-accent">
           ★ Premium
         </span>
       );
     return (
-      <span className="rounded-full bg-brand-ink/10 px-2 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-brand-ink-soft">
+      <span className="rounded-full bg-brand-ink/10 px-2 py-0.5 font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft">
         Free
       </span>
     );

@@ -104,7 +104,7 @@ export default function HeaderNav({
         {loggedIn ? (
           <Link href="/account" className="ml-1 flex items-center gap-1.5 px-2">
             {account?.isAdmin ? (
-              <span className="rounded-full bg-red-500/15 px-2 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-red-600">
+              <span className="rounded-full bg-red-500/15 px-2 py-0.5 font-mono text-[11px] uppercase tracking-eyebrow text-red-600">
                 ★ Admin
               </span>
             ) : null}

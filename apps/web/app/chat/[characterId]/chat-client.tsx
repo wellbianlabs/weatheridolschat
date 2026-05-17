@@ -1323,7 +1323,7 @@ export default function ChatClient({ character }: { character: Character }) {
               }
               autoFocus
               autoComplete="off"
-              className="h-11 flex-1 rounded-full border border-brand-ink/12 bg-white px-5 font-sans text-[15px] text-brand-ink outline-none transition focus:border-brand-ink/40"
+              className="h-11 flex-1 rounded-full border border-brand-ink/12 bg-white px-5 font-sans text-[16px] text-brand-ink outline-none transition focus:border-brand-ink/40"
             />
             <button
               type="submit"
@@ -1376,7 +1376,7 @@ function ChatBubble({
   if (message.role === 'user') {
     return (
       <div
-        className="max-w-[80%] rounded-2xl px-4 py-2.5 font-sans text-[15px] leading-relaxed text-white shadow-xs"
+        className="max-w-[80%] rounded-2xl px-4 py-2.5 font-sans text-[16px] leading-[1.65] text-white shadow-xs"
         style={{ background: accentColor }}
       >
         {message.content || ' '}
@@ -1393,7 +1393,7 @@ function ChatBubble({
   const displayContent = sanitizeAssistantText(message.content);
   return (
     <div
-      className="max-w-[80%] cursor-pointer rounded-2xl bg-white px-4 py-2.5 font-sans text-[15px] leading-relaxed text-brand-ink shadow-xs"
+      className="max-w-[80%] cursor-pointer rounded-2xl bg-white px-4 py-2.5 font-sans text-[16px] leading-[1.65] text-brand-ink shadow-xs"
       onClick={() => message.content && setOpen((v) => !v)}
     >
       {message.pending && !message.content ? (
@@ -1605,11 +1605,11 @@ function WeatherSongCard({
           />
         ) : null}
         <div className="absolute inset-x-4 top-3 flex items-start justify-between text-white">
-          <span className="font-mono text-[9px] uppercase tracking-eyebrow opacity-90">
+          <span className="font-mono text-[11px] uppercase tracking-eyebrow opacity-90">
             Weather Song
           </span>
           {track.status === 'done' ? (
-            <span className="rounded-full bg-white/25 px-2 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow backdrop-blur-sm">
+            <span className="rounded-full bg-white/25 px-2 py-0.5 font-mono text-[11px] uppercase tracking-eyebrow backdrop-blur-sm">
               ✓ 완성
             </span>
           ) : null}
@@ -2227,7 +2227,7 @@ function AccountChip({
       {isAdmin ? (
         <a
           href="/auth/logout"
-          className="rounded-full bg-red-500/15 px-2 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-red-600 hover:bg-red-500/25"
+          className="rounded-full bg-red-500/15 px-2 py-0.5 font-mono text-[11px] uppercase tracking-eyebrow text-red-600 hover:bg-red-500/25"
           title={`${email} — 로그아웃`}
         >
           ★ Admin
@@ -2242,7 +2242,7 @@ function AccountChip({
           </span>
           <a
             href="/auth/logout"
-            className="font-mono text-[9px] uppercase tracking-eyebrow text-brand-ink-soft/70 hover:text-brand-ink"
+            className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft/70 hover:text-brand-ink"
           >
             ↗
           </a>
@@ -2255,7 +2255,7 @@ function AccountChip({
           Login →
         </a>
       )}
-      <span className="font-mono text-[9px] uppercase tracking-eyebrow text-brand-ink-soft/70">
+      <span className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft/70">
         {counterText}
       </span>
     </div>
@@ -2334,7 +2334,7 @@ function ProductCardView({
     <div className="w-full max-w-[300px] overflow-hidden rounded-2xl bg-white shadow-md">
       <div className="flex items-center justify-between px-4 pt-3">
         <Chip variant="outline">{from}&rsquo;s pick</Chip>
-        <span className="font-mono text-[9px] uppercase tracking-eyebrow text-brand-ink-soft">
+        <span className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft">
           Ad
         </span>
       </div>

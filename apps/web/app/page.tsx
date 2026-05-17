@@ -443,7 +443,7 @@ function Polaroid({
         >
           {caption}
         </span>
-        <span className="font-mono text-[9px] uppercase tracking-eyebrow text-brand-ink-soft">
+        <span className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft">
           {meta}
         </span>
       </div>

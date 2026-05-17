@@ -4,9 +4,16 @@
 
 :root {
   color-scheme: light;
-  --font-display: 'Playfair Display', 'Pretendard Variable', Georgia, serif;
-  --font-sans: 'Inter', 'Pretendard Variable', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  /* The cascading font stack must match tailwind-preset.cjs exactly,
+     otherwise raw CSS selectors that don't use a tailwind class
+     (e.g. `body`, `::selection`) render with a different fallback
+     order from the rest of the app. var(--font-sans-kr) is the
+     Noto Sans KR variable injected by next/font in layout.tsx. */
+  --font-display: 'Playfair Display', var(--font-sans-kr), 'Pretendard Variable',
+    Georgia, serif;
+  --font-sans: var(--font-sans-kr), 'Inter', 'Pretendard Variable', system-ui,
+    sans-serif;
+  --font-mono: 'JetBrains Mono', var(--font-sans-kr), ui-monospace, monospace;
 }
 
 html,
@@ -15,9 +22,35 @@ body {
   background: #fffaf3;
   color: #241b3e;
   font-family: var(--font-sans);
-  font-feature-settings: 'cv11', 'ss01', 'ss03';
+  /* Default browser font-size is 16px. We bump to 17px because
+     Korean glyphs read about one px smaller than equivalent Latin
+     at the same point size — anything we mark `text-base` (16px)
+     was visually rendering as ~14-15px Hangul. This raises the
+     entire ramp by one notch without us having to touch every
+     `text-*` class downstream. Override per-component when needed. */
+  font-size: 16.5px;
+  line-height: 1.6;
+  /* Crispness stack:
+     - antialiased on WebKit (Chrome, Safari, mobile WebKit)
+     - grayscale on Firefox/macOS (was missing, causing thick fuzzy
+       glyphs on macOS Firefox specifically)
+     - optimizeLegibility forces kerning + ligatures on; the cost is
+       negligible for our short Korean lines but visibly tightens
+       Hangul. */
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+  /* Inter's stylistic-set features. `palt` enables proportional
+     Latin metrics inside Hangul flow — closes the awkward gap
+     between Korean and English when they're mixed in one line
+     ("K-pop 아이돌"). */
+  font-feature-settings:
+    'cv11',
+    'ss01',
+    'ss03',
+    'palt';
+  /* Prevent iOS Safari from upscaling text on rotation. */
+  -webkit-text-size-adjust: 100%;
   word-break: keep-all;
   overflow-wrap: break-word;
 }
