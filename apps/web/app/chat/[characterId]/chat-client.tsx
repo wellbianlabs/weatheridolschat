@@ -361,6 +361,105 @@ export default function ChatClient({ character }: { character: Character }) {
     saveHistory(character.id, messages);
   }, [character.id, messages]);
 
+  // ── Scheduled-greeting poller ────────────────────────────────────────
+  // The /api/cron/weather-greeting endpoint runs 4×/day (KST 7am/12pm/6pm/
+  // 10pm) and writes a row into `scheduled_messages` for each Premium
+  // user, addressed to the character they chatted with most recently.
+  // We poll that row store and inject the messages into the chat as if
+  // the character just spoke. Server bills only Premium users so anon /
+  // free clients get an empty list (the request still runs but is a
+  // no-op — kept on for consistency rather than adding a tier-aware
+  // branch here).
+  //
+  // Polling cadence:
+  //   - one immediate fetch on mount (catches messages queued while the
+  //     user was away)
+  //   - then every 60s while the tab is visible — paused via the
+  //     visibilitychange listener so a tab in the background doesn't
+  //     waste cycles or count against rate limits
+  //
+  // Dedup: the seen-ids ref guards against the case where a row is
+  // returned by the server again before our ack POST completes (e.g.
+  // ack request races with the next poll). Server-side `delivered_at`
+  // is the source of truth — this ref is just a UX safety belt so the
+  // bubble never renders twice in the same tab session.
+  const seenScheduledRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    let cancelled = false;
+
+    async function poll() {
+      if (cancelled) return;
+      // Skip work when the tab is hidden — the user can't see the
+      // bubble appear anyway, and the next visibilitychange will fire
+      // a fresh poll.
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') {
+        return;
+      }
+      try {
+        const res = await fetch(
+          `/api/scheduled/pending?characterId=${encodeURIComponent(character.id)}`,
+          { credentials: 'include' },
+        );
+        if (!res.ok) return;
+        const data = (await res.json()) as {
+          items?: Array<{ id: string; content: string; scheduledFor: string }>;
+        };
+        const items = data.items ?? [];
+        if (items.length === 0) return;
+
+        // Filter out anything we've already rendered locally this
+        // session — guards against a stale-then-ack race.
+        const fresh = items.filter((it) => !seenScheduledRef.current.has(it.id));
+        if (fresh.length === 0) return;
+        for (const it of fresh) seenScheduledRef.current.add(it.id);
+
+        // Append to the bubble stream as regular assistant turns.
+        // They get persisted via the existing saveHistory effect so
+        // they survive page refreshes even before ack completes.
+        setMessages((prev) => [
+          ...prev,
+          ...fresh.map((it) => ({
+            id: it.id,
+            role: 'assistant' as const,
+            kind: 'text' as MessageKind,
+            content: it.content,
+          })),
+        ]);
+
+        // Fire-and-forget ack — server will flip delivered_at so the
+        // next poll skips them. If this request fails (network blip),
+        // the seen-ids ref still protects this tab session, and the
+        // worst that happens is the next poll re-fetches them. The
+        // ref check above blocks re-render in that case.
+        void fetch('/api/scheduled/ack', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids: fresh.map((it) => it.id) }),
+          credentials: 'include',
+        }).catch(() => {
+          /* best-effort */
+        });
+      } catch {
+        /* Polling is best-effort. Don't surface transient errors. */
+      }
+    }
+
+    // Kickoff: fetch immediately on mount so any greetings that piled
+    // up while the user was away show up the moment they open the
+    // chat — not 60 seconds later.
+    void poll();
+    const interval = window.setInterval(poll, 60_000);
+    const onVis = () => {
+      if (document.visibilityState === 'visible') void poll();
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVis);
+    };
+  }, [character.id]);
+
   // Revoke any blob URLs we created for TTS playback when the page
   // unmounts, so the browser doesn't keep audio buffers in memory
   // after the user leaves the chat.

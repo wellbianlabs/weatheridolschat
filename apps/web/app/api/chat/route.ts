@@ -8,6 +8,7 @@ import { formatKstLocalTime } from '@wi/core/time';
 
 import { consumeQuota, quotaHeaders, type QuotaResult } from '@/lib/quota';
 import { resolveUser } from '@/lib/supabase/identity';
+import { getServiceSupabase } from '@/lib/supabase/service';
 import { pickChatAdapter, SYSTEM_PROMPTS } from '@wi/ai';
 import { getCurrentWeather } from '@wi/weather';
 
@@ -195,6 +196,14 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
+  // Record this turn in the `sessions` table so we can answer
+  // "which character did this user chat with most recently" — used
+  // by the 4×/day scheduled-greeting cron in
+  // apps/web/app/api/cron/weather-greeting to pick a sender. Anon
+  // callers skip silently (no `caller.id` to attribute the row to).
+  // Fire-and-forget — the chat stream MUST NOT block on this.
+  if (caller) void recordSessionTouch(caller.id, character.id);
+
   const userMessageId = cryptoRandom();
   const assistantMessageId = cryptoRandom();
 
@@ -273,6 +282,38 @@ export async function POST(req: Request): Promise<Response> {
 
 function cryptoRandom(): string {
   return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+}
+
+/**
+ * Upsert a row into `sessions` keyed on (user_id, character_id) and
+ * bump `last_message_at` to now. Used as a fire-and-forget side
+ * effect of the chat route so the scheduled-greeting cron can find
+ * each user's most recently-chatted character.
+ *
+ * No-op when the service-role key isn't configured. Errors are
+ * swallowed (logged) because nothing about the chat response depends
+ * on this succeeding — at worst the user just doesn't appear in the
+ * cron's audience until their next message.
+ */
+async function recordSessionTouch(userId: string, characterId: string): Promise<void> {
+  const svc = getServiceSupabase();
+  if (!svc) return;
+  try {
+    const nowIso = new Date().toISOString();
+    const { error } = await svc
+      .from('sessions')
+      .upsert(
+        { user_id: userId, character_id: characterId, last_message_at: nowIso },
+        { onConflict: 'user_id,character_id' },
+      );
+    if (error) {
+      console.warn(
+        `[chat] session touch fail user=${userId.slice(0, 8)}… char=${characterId}: ${error.message}`,
+      );
+    }
+  } catch (err) {
+    console.warn(`[chat] session touch threw: ${(err as Error).message}`);
+  }
 }
 
 function streamSingleText(text: string): Response {

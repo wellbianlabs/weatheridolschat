@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [
+    {
+      "path": "/api/cron/weather-greeting?slot=morning_7",
+      "schedule": "0 22 * * *"
+    },
+    {
+      "path": "/api/cron/weather-greeting?slot=lunch_12",
+      "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron/weather-greeting?slot=evening_18",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/cron/weather-greeting?slot=night_22",
+      "schedule": "0 13 * * *"
+    }
+  ]
+}
