@@ -15,9 +15,16 @@ import { KR_CITIES } from './cities';
  *
  *   1. Nickname (required) — used by all four characters when
  *      addressing the user.
- *   2. Location (optional) — geolocation API + permission, with a
- *      city dropdown as the offline fallback. Determines the
- *      weather feed used in chat / scheduled greetings.
+ *   2. Location (optional) — 16-city dropdown of Korean cities.
+ *      We intentionally do NOT use browser geolocation here:
+ *      - permission prompt adds friction on first run
+ *      - coords alone don't give a human-readable city label
+ *      - mobile / VPN / corporate-WiFi often returns wrong coords
+ *      - the user typically knows their own city better than the
+ *        browser's geolocation guess
+ *      A 16-pick dropdown covers >90% of the Korean population
+ *      footprint and gives the LLM a clear "위치: 부산 해운대구"
+ *      line in the [Now Context] block.
  *   3. Birth year (optional) — single 4-digit input. We don't need
  *      day precision for age-cohort decisions and asking for it
  *      feels intrusive.
@@ -38,9 +45,6 @@ import { KR_CITIES } from './cities';
  * UX rules:
  *   - Nickname is the only required field. Everything else can be
  *     left blank and the form still submits.
- *   - Geolocation request only happens after the user explicitly
- *     taps the "내 위치 사용" button. Browsers downrank pages that
- *     auto-prompt for sensitive permissions on load.
  *   - Enter on the nickname input submits the form (low-friction
  *     for users who don't want to fill the optional sections).
  */
@@ -50,7 +54,6 @@ interface LocationPick {
   lat: number;
   lng: number;
   label: string;
-  source: 'geolocation' | 'city';
 }
 
 const CURRENT_YEAR = new Date().getFullYear();
@@ -63,9 +66,6 @@ export default function OnboardingPage() {
   const [birthYear, setBirthYear] = useState<string>('');
   const [gender, setGender] = useState<Gender | null>(null);
   const [location, setLocation] = useState<LocationPick | null>(null);
-  const [geoStatus, setGeoStatus] = useState<'idle' | 'asking' | 'denied' | 'unavailable'>(
-    'idle',
-  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -78,44 +78,14 @@ export default function OnboardingPage() {
     if (existing) setNickname(existing);
   }, []);
 
-  function pickGeolocation() {
-    if (typeof navigator === 'undefined' || !navigator.geolocation) {
-      setGeoStatus('unavailable');
+  function pickCity(cityId: string) {
+    if (!cityId) {
+      setLocation(null);
       return;
     }
-    setGeoStatus('asking');
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        setLocation({
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          // We don't reverse-geocode in MVP — "내 위치" reads
-          // naturally in the [Now Context] block, and the weather
-          // provider takes lat/lng regardless of label text.
-          label: '내 위치',
-          source: 'geolocation',
-        });
-        setGeoStatus('idle');
-      },
-      (err) => {
-        // PERMISSION_DENIED (1) → user said no. Other errors
-        // (timeout, position unavailable) → device couldn't get a
-        // fix. Either way we surface the city dropdown.
-        setGeoStatus(err.code === 1 ? 'denied' : 'unavailable');
-      },
-      { timeout: 10_000, maximumAge: 60_000 },
-    );
-  }
-
-  function pickCity(cityId: string) {
     const city = KR_CITIES.find((c) => c.id === cityId);
     if (!city) return;
-    setLocation({
-      lat: city.lat,
-      lng: city.lng,
-      label: city.label,
-      source: 'city',
-    });
+    setLocation({ lat: city.lat, lng: city.lng, label: city.label });
   }
 
   async function complete() {
@@ -209,67 +179,38 @@ export default function OnboardingPage() {
           />
         </section>
 
-        {/* ── 2. Location (optional) ─────────────────────────────── */}
+        {/* ── 2. Location (optional, dropdown only) ──────────────── */}
+        {/* 16-city dropdown — see the file-header JSDoc for why we
+            deliberately skip browser geolocation here. The user
+            knows their own city; a single select is the lowest-
+            friction control to capture it. */}
         <section className="mt-10 flex flex-col gap-3">
           <label className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft">
             ② 위치 · Location (선택, 동네 날씨에 맞춰 대화해요)
           </label>
-
+          <select
+            value={
+              location
+                ? (KR_CITIES.find(
+                    (c) => c.lat === location.lat && c.lng === location.lng,
+                  )?.id ?? '')
+                : ''
+            }
+            onChange={(e) => pickCity(e.target.value)}
+            className="h-12 w-full appearance-none rounded-full border border-brand-ink/15 bg-white px-5 font-sans text-[15px] text-brand-ink outline-none transition focus:border-brand-ink/30"
+          >
+            <option value="">선택 안 함 (기본: 서울 강남구)</option>
+            {KR_CITIES.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
           {location ? (
-            <div className="flex items-center justify-between rounded-2xl border border-brand-ink/12 bg-white px-4 py-3">
-              <div className="flex items-center gap-2">
-                <span className="text-[18px]">📍</span>
-                <span className="font-sans text-[15px] text-brand-ink">{location.label}</span>
-                <span className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft">
-                  · {location.lat.toFixed(2)}, {location.lng.toFixed(2)}
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setLocation(null)}
-                className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft hover:text-brand-ink"
-              >
-                바꾸기
-              </button>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3">
-              <button
-                type="button"
-                onClick={pickGeolocation}
-                disabled={geoStatus === 'asking'}
-                className="flex h-12 items-center justify-center gap-2 rounded-full border border-brand-ink/15 bg-white font-sans text-[15px] font-medium text-brand-ink transition hover:border-brand-ink/30 disabled:opacity-60"
-              >
-                <span>📍</span>
-                {geoStatus === 'asking' ? '위치 확인 중…' : '내 현재 위치 사용'}
-              </button>
-              {geoStatus === 'denied' ? (
-                <p className="font-sans text-[13px] text-brand-ink-soft">
-                  위치 권한이 막혔어요. 아래에서 도시를 선택해주세요.
-                </p>
-              ) : null}
-              {geoStatus === 'unavailable' ? (
-                <p className="font-sans text-[13px] text-brand-ink-soft">
-                  이 기기에서 위치를 가져올 수 없어요. 아래에서 도시를 선택해주세요.
-                </p>
-              ) : null}
-
-              <select
-                onChange={(e) => pickCity(e.target.value)}
-                defaultValue=""
-                className="h-12 w-full appearance-none rounded-full border border-brand-ink/15 bg-white px-5 font-sans text-[15px] text-brand-ink outline-none transition focus:border-brand-ink/30"
-              >
-                <option value="" disabled>
-                  또는 도시 선택…
-                </option>
-                {KR_CITIES.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
+            <p className="font-sans text-[12px] text-brand-ink-soft">
+              선택됨: <span className="text-brand-ink">{location.label}</span>
+            </p>
+          ) : null}
         </section>
 
         {/* ── 3. Birth year (optional) ──────────────────────────── */}
