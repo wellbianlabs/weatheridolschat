@@ -76,6 +76,13 @@ interface UIMessage {
   product?: ProductPayload;
   music?: MusicTrack;
   pending?: boolean;
+  /**
+   * Epoch ms of when this message landed. Drives the KakaoTalk-style
+   * date dividers + per-bubble time stamps + same-sender grouping.
+   * Always populated for new messages; legacy localStorage rows
+   * without it fall back to `Date.now()` at load time.
+   */
+  createdAt: number;
   /** Object URL of a Google TTS-rendered MP3, cached on first 🔊 click.
    *  Reused for replay + download so we don't re-bill the API. */
   ttsUrl?: string;
@@ -265,7 +272,19 @@ function loadHistory(characterId: string): UIMessage[] | null {
     const raw = localStorage.getItem(storageKey(characterId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as UIMessage[];
-    return Array.isArray(parsed) ? parsed : null;
+    if (!Array.isArray(parsed)) return null;
+    // Migrate legacy rows that predate the createdAt field. Anchor
+    // them to a single "yesterday" timestamp rather than `Date.now()`
+    // so they don't all collapse into a single fake "right now"
+    // group — KakaoTalk's date divider then puts them under
+    // "어제" which reads correctly for restored history.
+    const yesterday = Date.now() - 24 * 60 * 60 * 1000;
+    return parsed.map((m, i) => ({
+      ...m,
+      // Spread small i-millisecond offsets so the relative order is
+      // preserved when we sort or group by time.
+      createdAt: typeof m.createdAt === 'number' ? m.createdAt : yesterday + i,
+    }));
   } catch {
     return null;
   }
@@ -273,6 +292,142 @@ function loadHistory(characterId: string): UIMessage[] | null {
 function saveHistory(characterId: string, messages: UIMessage[]) {
   if (typeof window === 'undefined') return;
   localStorage.setItem(storageKey(characterId), JSON.stringify(messages.slice(-50)));
+}
+
+// ── KakaoTalk-style time / date formatting + grouping ─────────────────
+
+/**
+ * KST-aware "오전 9:35" / "오후 2:07" hh:mm formatter.
+ *
+ * KakaoTalk uses 12-hour with explicit 오전/오후 prefix — far more
+ * readable for Korean users than a bare "14:07". We pull hour/min
+ * via `formatToParts` in 24h mode and prepend the period ourselves
+ * because some ICU builds (Node 18 on Linux, older WebKit) render
+ * the dayPeriod for ko-KR as "AM"/"PM" instead of "오전"/"오후".
+ * Hand-rolling the prefix guarantees the Korean form every time.
+ */
+function formatBubbleTime(ts: number): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Seoul',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(new Date(ts));
+  const h24 = Number.parseInt(parts.find((p) => p.type === 'hour')?.value ?? '0', 10);
+  const minute = parts.find((p) => p.type === 'minute')?.value ?? '00';
+  const period = h24 < 12 ? '오전' : '오후';
+  // 12-hour clock: midnight = 12, 1pm = 1, 12pm = 12.
+  const h12 = h24 === 0 ? 12 : h24 > 12 ? h24 - 12 : h24;
+  return `${period} ${h12}:${minute}`;
+}
+
+/**
+ * KST calendar-day string ("2026-05-18"). Compared as plain text to
+ * detect day boundaries between adjacent messages.
+ */
+function kstDayKey(ts: number): string {
+  // en-CA happens to emit YYYY-MM-DD, perfect for sortable comparison.
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(ts));
+}
+
+/**
+ * Date-divider label: "2026년 5월 18일 월요일" — what KakaoTalk shows
+ * as a centered pill between message groups when the day rolls over.
+ * Today / yesterday get friendly aliases so the divider doesn't
+ * scream "May 18" at someone scrolling through their own day.
+ */
+function formatDateDivider(ts: number): string {
+  const todayKey = kstDayKey(Date.now());
+  const tsKey = kstDayKey(ts);
+  if (tsKey === todayKey) return '오늘';
+  const yesterdayKey = kstDayKey(Date.now() - 24 * 60 * 60 * 1000);
+  if (tsKey === yesterdayKey) return '어제';
+  return new Intl.DateTimeFormat('ko-KR', {
+    timeZone: 'Asia/Seoul',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long',
+  }).format(new Date(ts));
+}
+
+interface RenderInfo {
+  /** Show a centered date pill BEFORE this message. */
+  showDateDivider: boolean;
+  /** Show the character name (assistant) above this message. */
+  showSenderHeader: boolean;
+  /** Show a timestamp NEXT to this message bubble. */
+  showTime: boolean;
+  /** Tight 4px top gap (within a group) vs wide 16px (between groups). */
+  tightTop: boolean;
+}
+
+/**
+ * Decide, for each message, what KakaoTalk-style chrome to attach:
+ *
+ *   - Date divider when the KST calendar day differs from the prev
+ *     message's day (or this is the first message).
+ *   - Sender header (assistant only) on the first message of a new
+ *     same-sender run — i.e. when prev was a different role, or a
+ *     new day started, or > 30 min has passed.
+ *   - Time stamp on the LAST message of each same-sender run, so a
+ *     burst of 3 quick messages shows time only once (cleaner).
+ *   - Tight top spacing within a run, wide between runs.
+ *
+ * The "same-sender run" boundary is the key concept: visually,
+ * KakaoTalk packs consecutive same-sender messages tightly so they
+ * read as one paragraph, and only shows the time on the last one
+ * because typing-finished-at-X is what matters, not each line.
+ */
+function computeRenderInfo(messages: UIMessage[]): RenderInfo[] {
+  // Group threshold: messages from the same sender within this many
+  // ms are considered one "burst" and grouped tightly. 5 minutes
+  // matches Kakao's empirical behaviour — quick replies cluster,
+  // a long pause restarts the group.
+  const SAME_GROUP_GAP_MS = 5 * 60 * 1000;
+
+  return messages.map((m, i): RenderInfo => {
+    const prev = i > 0 ? messages[i - 1] : null;
+    const next = i < messages.length - 1 ? messages[i + 1] : null;
+
+    const prevDay = prev ? kstDayKey(prev.createdAt) : null;
+    const currDay = kstDayKey(m.createdAt);
+    const showDateDivider = !prev || prevDay !== currDay;
+
+    // Same-sender run boundary: changed role, new day, or > gap.
+    const isFirstInRun =
+      !prev ||
+      prev.role !== m.role ||
+      prevDay !== currDay ||
+      m.createdAt - prev.createdAt > SAME_GROUP_GAP_MS;
+
+    // Sender header (character name) only appears at the top of an
+    // assistant run. User messages never get a header — it's their
+    // own message, they know who sent it.
+    const showSenderHeader = m.role === 'assistant' && isFirstInRun;
+
+    // Last in run: next message is from a different sender, or
+    // doesn't exist, or is > gap away, or starts a new day.
+    const nextDay = next ? kstDayKey(next.createdAt) : null;
+    const isLastInRun =
+      !next ||
+      next.role !== m.role ||
+      currDay !== nextDay ||
+      next.createdAt - m.createdAt > SAME_GROUP_GAP_MS;
+    const showTime = isLastInRun;
+
+    return {
+      showDateDivider,
+      showSenderHeader,
+      showTime,
+      tightTop: !isFirstInRun && !showDateDivider,
+    };
+  });
 }
 
 export default function ChatClient({ character }: { character: Character }) {
@@ -291,6 +446,7 @@ export default function ChatClient({ character }: { character: Character }) {
         character.id as CharacterId,
         character.displayName,
       ),
+      createdAt: Date.now(),
     },
   ]);
   const [input, setInput] = useState('');
@@ -433,6 +589,12 @@ export default function ChatClient({ character }: { character: Character }) {
             role: 'assistant' as const,
             kind: 'text' as MessageKind,
             content: it.content,
+            // Scheduled greetings carry their own intended send time
+            // — use that so the bubble lands at the right point in
+            // the date timeline (e.g. a morning_7 ping shows under
+            // today's "오전 7시 ~" group even if the user opens the
+            // chat at noon).
+            createdAt: it.scheduledFor ? new Date(it.scheduledFor).getTime() : Date.now(),
           })),
         ]);
 
@@ -916,6 +1078,7 @@ export default function ChatClient({ character }: { character: Character }) {
     const assistantId = crypto.randomUUID();
     // Show the attached image as the user's bubble alongside their
     // text so the chat record visually matches what the LLM saw.
+    const now = Date.now();
     setMessages((prev) => [
       ...prev,
       ...(attachedImage
@@ -925,11 +1088,29 @@ export default function ChatClient({ character }: { character: Character }) {
               role: 'user' as const,
               kind: 'image' as const,
               imageUrl: attachedImage,
+              createdAt: now,
             },
           ]
         : []),
-      { id: userId, role: 'user', kind: 'text', content: text || '(사진을 보냈어)' },
-      { id: assistantId, role: 'assistant', kind: 'text', content: '', pending: true },
+      {
+        id: userId,
+        role: 'user',
+        kind: 'text',
+        content: text || '(사진을 보냈어)',
+        // +1ms so the user's text bubble is sorted after their photo
+        // when both are sent in the same tick.
+        createdAt: now + 1,
+      },
+      {
+        id: assistantId,
+        role: 'assistant',
+        kind: 'text',
+        content: '',
+        pending: true,
+        // +2ms so the assistant placeholder appears after the user's
+        // text, then gets filled in via stream.
+        createdAt: now + 2,
+      },
     ]);
 
     let imageIntentTriggered = false;
@@ -1075,6 +1256,7 @@ export default function ChatClient({ character }: { character: Character }) {
             role: 'assistant',
             kind: 'product',
             product: productCard ?? undefined,
+            createdAt: Date.now(),
           },
         ]);
       }
@@ -1083,7 +1265,7 @@ export default function ChatClient({ character }: { character: Character }) {
         const imageId = crypto.randomUUID();
         setMessages((prev) => [
           ...prev,
-          { id: imageId, role: 'assistant', kind: 'image', pending: true },
+          { id: imageId, role: 'assistant', kind: 'image', pending: true, createdAt: Date.now() },
         ]);
         try {
           const imgRes = await fetch('/api/image', {
@@ -1156,6 +1338,7 @@ export default function ChatClient({ character }: { character: Character }) {
             kind: 'music',
             pending: true,
             music: { taskId: '', status: 'queued' },
+            createdAt: Date.now(),
           },
         ]);
         void generateWeatherSong(songId, text);
@@ -1226,52 +1409,107 @@ export default function ChatClient({ character }: { character: Character }) {
           </div>
         </header>
 
-        {/* MESSAGES */}
-        <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto px-6 py-6">
-          {messages.map((m) => (
-            <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              {m.kind === 'image' ? (
-                <div className="overflow-hidden rounded-2xl bg-white shadow-sm">
-                  {m.pending ? (
-                    <ImageGeneratingState accent={character.accentColor} />
-                  ) : (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={m.imageUrl}
-                      alt={`${character.displayName} selfie`}
-                      width={256}
-                      height={256}
-                      className="block h-64 w-64 object-cover"
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).style.display = 'none';
-                      }}
-                    />
-                  )}
+        {/* MESSAGES — KakaoTalk-style layout
+            Each row may include:
+              · a centered date pill when the KST day rolls over
+              · a small sender header above the first message of a
+                new assistant run (character name in accent color)
+              · the bubble itself, aligned left (assistant) or right
+                (user)
+              · a "오후 2:35" timestamp on the LAST message of each
+                run, hugging the side closer to the bubble — left of
+                the user bubble, right of the assistant bubble
+            See computeRenderInfo() above for the grouping rules. */}
+        <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6">
+          {(() => {
+            const info = computeRenderInfo(messages);
+            return messages.map((m, i) => {
+              const r = info[i]!;
+              return (
+                <div key={m.id}>
+                  {r.showDateDivider ? <DateDivider ts={m.createdAt} /> : null}
+                  {r.showSenderHeader ? (
+                    <div
+                      className="mt-4 mb-1 flex items-center gap-2"
+                      style={{ paddingLeft: '2px' }}
+                    >
+                      <span
+                        className="flex h-6 w-6 items-center justify-center rounded-full text-[12px]"
+                        style={{
+                          background: character.accentColor + '26',
+                          color: character.accentColor,
+                        }}
+                        aria-hidden
+                      >
+                        {character.displayName.slice(0, 1)}
+                      </span>
+                      <span className="font-sans text-[13px] font-medium text-brand-ink">
+                        {character.displayName}
+                      </span>
+                    </div>
+                  ) : null}
+                  <div
+                    className={`flex items-end gap-1.5 animate-fade-up ${
+                      m.role === 'user' ? 'justify-end' : 'justify-start'
+                    } ${r.tightTop ? 'mt-1' : r.showSenderHeader ? 'mt-0' : 'mt-3'}`}
+                  >
+                    {/* User: time on LEFT of bubble (closer to bubble) */}
+                    {m.role === 'user' && r.showTime ? (
+                      <BubbleTime ts={m.createdAt} side="left" />
+                    ) : null}
+
+                    {m.kind === 'image' ? (
+                      <div className="overflow-hidden rounded-2xl bg-white shadow-sm">
+                        {m.pending ? (
+                          <ImageGeneratingState accent={character.accentColor} />
+                        ) : (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={m.imageUrl}
+                            alt={`${character.displayName} selfie`}
+                            width={256}
+                            height={256}
+                            className="block h-64 w-64 object-cover"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).style.display = 'none';
+                            }}
+                          />
+                        )}
+                      </div>
+                    ) : m.kind === 'product' && m.product ? (
+                      <ProductCardView
+                        product={m.product}
+                        accent={character.accentColor}
+                        from={character.displayName}
+                      />
+                    ) : m.kind === 'music' && m.music ? (
+                      <WeatherSongCard
+                        track={m.music}
+                        accent={character.accentColor}
+                        from={character.displayName}
+                        weatherLabel={
+                          weather ? (WEATHER_LABEL[weather.condition] ?? weather.condition) : ''
+                        }
+                        onCancel={() => cancelSong(m.id)}
+                      />
+                    ) : (
+                      <ChatBubble
+                        message={m}
+                        accentColor={character.accentColor}
+                        onRegenerate={handleRegenerate}
+                        onPlayTts={playTts}
+                      />
+                    )}
+
+                    {/* Assistant: time on RIGHT of bubble */}
+                    {m.role === 'assistant' && r.showTime ? (
+                      <BubbleTime ts={m.createdAt} side="right" />
+                    ) : null}
+                  </div>
                 </div>
-              ) : m.kind === 'product' && m.product ? (
-                <ProductCardView
-                  product={m.product}
-                  accent={character.accentColor}
-                  from={character.displayName}
-                />
-              ) : m.kind === 'music' && m.music ? (
-                <WeatherSongCard
-                  track={m.music}
-                  accent={character.accentColor}
-                  from={character.displayName}
-                  weatherLabel={weather ? WEATHER_LABEL[weather.condition] ?? weather.condition : ''}
-                  onCancel={() => cancelSong(m.id)}
-                />
-              ) : (
-                <ChatBubble
-                  message={m}
-                  accentColor={character.accentColor}
-                  onRegenerate={handleRegenerate}
-                  onPlayTts={playTts}
-                />
-              )}
-            </div>
-          ))}
+              );
+            });
+          })()}
         </div>
 
         {/* COMPOSER */}
@@ -1407,7 +1645,10 @@ export default function ChatClient({ character }: { character: Character }) {
             <button
               type="submit"
               disabled={sending || (!input.trim() && !pendingImage)}
-              className="flex h-11 min-w-[72px] items-center justify-center rounded-full px-5 font-sans text-[14px] font-medium text-white transition disabled:opacity-60"
+              // 타격감: scale-down on press + shadow swell so the
+              // button feels physically pushed. Disabled state drops
+              // both effects since there's no action to react to.
+              className="flex h-11 min-w-[72px] items-center justify-center rounded-full px-5 font-sans text-[14px] font-medium text-white shadow-xs transition-all duration-100 ease-out hover:shadow-sm active:scale-[0.94] active:shadow-xs disabled:scale-100 disabled:opacity-60 disabled:shadow-none"
               style={{ background: character.accentColor }}
             >
               {sending ? (
@@ -2338,6 +2579,53 @@ function AccountChip({
         {counterText}
       </span>
     </div>
+  );
+}
+
+/**
+ * Centered date pill placed between messages whenever the KST
+ * calendar day rolls over. Same idiom as KakaoTalk's "2026년 5월
+ * 18일 월요일" divider — quickly tells the user "this is a new
+ * day" without breaking the message rhythm. Today / yesterday get
+ * friendly aliases.
+ *
+ * Visual: a thin pill against the page background, with hairline
+ * lines on either side. Deliberately *not* a hard horizontal
+ * rule — softer, doesn't shout.
+ */
+function DateDivider({ ts }: { ts: number }) {
+  return (
+    <div className="my-5 flex items-center gap-3" role="separator" aria-label="날짜">
+      <div className="h-px flex-1 bg-brand-ink/8" />
+      <span className="rounded-full bg-brand-ink/8 px-3 py-1 font-sans text-[11px] font-medium text-brand-ink-soft">
+        {formatDateDivider(ts)}
+      </span>
+      <div className="h-px flex-1 bg-brand-ink/8" />
+    </div>
+  );
+}
+
+/**
+ * Tiny "오전 9:35" timestamp shown next to the LAST bubble of each
+ * same-sender run. Sized small (11px), aligned to the baseline of
+ * the bubble (items-end on parent), and tucked tight against the
+ * bubble on the inside edge — matches KakaoTalk's chat-record
+ * geometry where time hugs the bubble rather than floating in the
+ * margin.
+ *
+ *   side='left'  → user bubble, time appears to its LEFT
+ *   side='right' → assistant bubble, time appears to its RIGHT
+ */
+function BubbleTime({ ts, side }: { ts: number; side: 'left' | 'right' }) {
+  return (
+    <span
+      className={`select-none font-sans text-[11px] text-brand-ink-soft/80 ${
+        side === 'left' ? 'mr-0.5' : 'ml-0.5'
+      }`}
+      style={{ marginBottom: '2px' }}
+    >
+      {formatBubbleTime(ts)}
+    </span>
   );
 }
 

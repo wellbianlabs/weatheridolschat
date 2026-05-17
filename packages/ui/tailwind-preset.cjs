@@ -139,8 +139,12 @@ module.exports = {
       },
       keyframes: {
         'fade-up': {
-          '0%': { opacity: '0', transform: 'translateY(8px)' },
-          '100%': { opacity: '1', transform: 'translateY(0)' },
+          // Slightly more pronounced rise (+12px from +8px) + a hair
+          // of scale so freshly-arrived chat bubbles "pop" rather
+          // than fade. Read as physical landing in the messaging
+          // surface, not a slow opacity ramp.
+          '0%': { opacity: '0', transform: 'translateY(12px) scale(0.98)' },
+          '100%': { opacity: '1', transform: 'translateY(0) scale(1)' },
         },
         shimmer: {
           '0%,100%': { backgroundPosition: '0% 50%' },
