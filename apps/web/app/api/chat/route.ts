@@ -260,7 +260,13 @@ export async function POST(req: Request): Promise<Response> {
           send({ type: 'tool', name: 'request_image', output: { intent: 'selfie' } });
         } else if (intent === 'song_request') {
           send({ type: 'tool', name: 'request_song', output: {} });
-        } else if (intent === 'recommend') {
+        } else if (intent === 'recommend' && shouldAttachProductCard(text)) {
+          // Stricter gate than the previous "fire on every recommend
+          // intent" — see shouldAttachProductCard() below for the
+          // why. The text-side discipline lives in
+          // packages/ai/src/prompts/system/index.ts (the global
+          // PRODUCT_DISCIPLINE block); this is the visual-card half
+          // of the same rule.
           const product = pickProductForCharacter(character.id);
           if (product) {
             send({ type: 'attachment', payload: { kind: 'product', ...product } });
@@ -293,6 +299,53 @@ export async function POST(req: Request): Promise<Response> {
 
 function cryptoRandom(): string {
   return globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2);
+}
+
+/**
+ * Stricter gate for attaching a product card to the chat stream.
+ *
+ * Old behaviour: any 'recommend' intent (which fired on bare
+ * "추천" / "어디 갈" / "뭐 먹" / "어딜 가") auto-attached a card. In
+ * practice that meant a user mentioning "춘천에서 추천해줄 카페
+ * 있어?" would see a selfie-line-themed lipstick card pop up because
+ * the intent matched and the card was character-keyed, not
+ * topic-keyed. That reads as a salesman, which is the opposite of
+ * the friend-recommends-a-gift feel the product is trying to build.
+ *
+ * New rules — ALL of these must hold for a card to attach:
+ *
+ *   1. The user text contains an explicit purchase / gifting verb,
+ *      not just generic "추천". The list below is intentionally
+ *      narrow so accidental triggers are rare.
+ *   2. A 30% probability gate. Even when the user is unambiguously
+ *      shopping, we don't want every reply to end with a product
+ *      card — friends suggest things sometimes, not always. The
+ *      LLM still talks about the topic in prose; the card is a
+ *      sometimes-bonus.
+ *
+ * If both pass we attach a single card. The text-side prompt (see
+ * PRODUCT_DISCIPLINE in packages/ai/src/prompts/system/index.ts)
+ * additionally tells the character not to over-sell *in* the prose,
+ * regardless of whether the card is attached.
+ *
+ * Future: when the Nasmedia integration lands and product cards are
+ * tied to the actual topic the user mentioned, we can lower the
+ * probability gate and tighten the relevance match instead of
+ * relying on the verb list.
+ */
+function shouldAttachProductCard(text: string): boolean {
+  const t = text.toLowerCase();
+  // Verbs that clearly signal "I want to buy / receive a thing".
+  // "어디 갈" is intentionally NOT here — that's a destination
+  // question, not a shopping one, and triggering on it was the
+  // primary source of the "춘천 → 닭갈비 광고" complaint.
+  const purchaseIntent =
+    /(사고\s*싶|살\s*만한|살\s*거|살\s*수|살\s*까|구매|구입|쇼핑|선물|기프트|gift|어디서\s*사|어디서\s*살)/.test(t);
+  if (!purchaseIntent) return false;
+  // Probability gate — even when shopping intent is real, only ~30%
+  // of replies attach a card. The user gets verbal suggestions
+  // every time; the visual card is a sometimes-extra.
+  return Math.random() < 0.3;
 }
 
 /**

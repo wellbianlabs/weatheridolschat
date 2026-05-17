@@ -32,7 +32,15 @@ export function classifyIntent(text: string): ChatIntent {
   }
 
   if (/(노래|음악|들려|song|music)/.test(t)) return 'song_request';
-  if (/(추천|뭐 먹|어디 갈|뭘 입|어딜 가|recommend)/.test(t)) return 'recommend';
+  // 'recommend' intent: deliberately NARROW — we used to match on
+  // "어디 갈 / 뭐 먹 / 뭘 입 / 어딜 가", which fired on normal
+  // conversational questions ("춘천에서 어디 갈만한 데 있어?") and
+  // produced salesy product-card pop-ups for unrelated topics.
+  // Keep only the explicit "recommendation" word so this signal is
+  // used for analytics / response routing, not aggressive ad
+  // injection. The chat route additionally requires a purchase verb
+  // before attaching a product card — see shouldAttachProductCard().
+  if (/(추천|recommend)/.test(t)) return 'recommend';
   if (/(슬퍼|힘들|우울|짜증|외로워|sad|lonely|stressed)/.test(t)) return 'comfort';
   if (/(날씨|비|눈|더워|추워|기온|weather|rain|snow|temperature)/.test(t))
     return 'weather_question';
