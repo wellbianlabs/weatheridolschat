@@ -4,7 +4,7 @@ import { CHARACTERS } from '@wi/core/characters';
 import { classifyIntent } from '@wi/core/chat';
 import { pickProductForCharacter } from '@wi/core/monetization';
 import { runInputSafeguard } from '@wi/core/safeguards';
-import { formatKstLocalTime } from '@wi/core/time';
+import { buildKstContext, formatKstLocalTime } from '@wi/core/time';
 
 import { consumeQuota, quotaHeaders, type QuotaResult } from '@/lib/quota';
 import { resolveUser } from '@/lib/supabase/identity';
@@ -221,7 +221,18 @@ export async function POST(req: Request): Promise<Response> {
           history: [],
           // localTime is for the LLM's [Now Context] block. Always KST —
           // server runs in UTC on Vercel, but our characters live in 한국.
-          user: { nickname, locale: 'ko', localTime: formatKstLocalTime(), tier },
+          user: {
+            nickname,
+            locale: 'ko',
+            localTime: formatKstLocalTime(),
+            // Rich context (time-of-day bucket, weekend flag, season)
+            // — drives the [Now Context] block in the system prompt
+            // so the model can pick a tone/detail that fits this
+            // exact moment instead of having to infer from the
+            // formatted timestamp.
+            localTimeContext: buildKstContext(),
+            tier,
+          },
           userMessage: text,
           userImage,
           ids: { userMessageId, assistantMessageId },

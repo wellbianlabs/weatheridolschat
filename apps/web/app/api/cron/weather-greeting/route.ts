@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 
 import { CHARACTERS, type CharacterId } from '@wi/core/characters';
-import { formatKstLocalTime } from '@wi/core/time';
+import { buildKstContext, formatKstLocalTime } from '@wi/core/time';
 import {
   buildScheduledGreetingUserPrompt,
   pickChatAdapter,
@@ -247,6 +247,7 @@ async function processOneUser(args: {
         nickname: user.nickname,
         locale: 'ko',
         localTime: formatKstLocalTime(),
+        localTimeContext: buildKstContext(),
         tier: 'premium',
       },
       userMessage: userPrompt,

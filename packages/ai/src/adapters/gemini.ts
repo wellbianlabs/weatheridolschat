@@ -73,6 +73,7 @@ export function createGeminiAdapter(apiKey: string): ChatAdapter {
           nickname: input.user.nickname,
           locale: input.user.locale,
           localTime: input.user.localTime,
+          localTimeContext: input.user.localTimeContext,
           tier: input.user.tier,
         },
         weather: input.weather,

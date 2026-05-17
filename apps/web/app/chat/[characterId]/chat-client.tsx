@@ -2270,7 +2270,7 @@ function AccountChip({
  */
 function TypingDots({ accent }: { accent: string }) {
   return (
-    <span className="inline-flex items-center gap-1 py-[3px]" aria-label="응답 생성 중">
+    <span className="inline-flex items-center gap-1 py-[3px]" aria-label="응답 입력 중">
       {[0, 160, 320].map((delay) => (
         <span
           key={delay}
@@ -2279,7 +2279,7 @@ function TypingDots({ accent }: { accent: string }) {
         />
       ))}
       <span className="ml-1.5 font-mono text-[10px] uppercase tracking-eyebrow text-brand-ink-soft">
-        생성 중
+        입력 중
       </span>
     </span>
   );

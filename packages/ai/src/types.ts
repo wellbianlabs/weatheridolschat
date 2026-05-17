@@ -1,5 +1,6 @@
 import type { CharacterId, Character } from '@wi/core/characters';
 import type { ChatStreamEvent, Message } from '@wi/core/chat';
+import type { KstContext } from '@wi/core/time';
 import type { WeatherSnapshot } from '@wi/core/weather';
 
 export type AdapterTier = 'free' | 'premium';
@@ -9,7 +10,22 @@ export interface ChatAdapterInput {
   characterSystemPrompt: string;
   weather: WeatherSnapshot;
   history: Message[];
-  user: { nickname: string; locale: 'ko' | 'en' | 'ja'; localTime: string; tier: AdapterTier };
+  user: {
+    nickname: string;
+    locale: 'ko' | 'en' | 'ja';
+    /** Human-readable KST display, e.g. "2026-05-16 (토) 13:25 KST". */
+    localTime: string;
+    /**
+     * Optional rich KST bundle — time-of-day bucket, weekend flag,
+     * season. Passed by the chat + scheduled-greeting routes so the
+     * [Now Context] prompt block can render categorical anchors the
+     * LLM uses to fit tone + detail to this exact moment. Adapters
+     * that don't have it (older callers / mock fixtures) still work
+     * via the plain `localTime` string.
+     */
+    localTimeContext?: KstContext;
+    tier: AdapterTier;
+  };
   userMessage: string;
   ids: { userMessageId: string; assistantMessageId: string };
   memorySummary?: string;
