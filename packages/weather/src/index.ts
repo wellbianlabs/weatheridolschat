@@ -1,6 +1,7 @@
 export * from './providers/types';
 export * from './providers/mock';
 export * from './providers/kweather';
+export * from './providers/krSggCodes';
 export * from './providers/openweathermap';
 export * from './providers/openmeteo';
 export * from './router';

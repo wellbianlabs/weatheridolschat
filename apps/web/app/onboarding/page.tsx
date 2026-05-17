@@ -1,52 +1,39 @@
 'use client';
 
 import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { Button, Eyebrow, Wordmark } from '@wi/ui/web';
 
 import HeaderNav from '@/components/HeaderNav';
 import { getBrowserSupabase } from '@/lib/supabase/browser';
 
-import { KR_CITIES } from './cities';
+import {
+  getDongsForSgg,
+  getSggsForProvince,
+  PROVINCES,
+  type DongChoice,
+  type SggChoice,
+} from './regions';
 
 /**
  * Onboarding form — single scrolling page, four sections:
  *
- *   1. Nickname (required) — used by all four characters when
- *      addressing the user.
- *   2. Location (optional) — 16-city dropdown of Korean cities.
- *      We intentionally do NOT use browser geolocation here:
- *      - permission prompt adds friction on first run
- *      - coords alone don't give a human-readable city label
- *      - mobile / VPN / corporate-WiFi often returns wrong coords
- *      - the user typically knows their own city better than the
- *        browser's geolocation guess
- *      A 16-pick dropdown covers >90% of the Korean population
- *      footprint and gives the LLM a clear "위치: 부산 해운대구"
- *      line in the [Now Context] block.
- *   3. Birth year (optional) — single 4-digit input. We don't need
- *      day precision for age-cohort decisions and asking for it
- *      feels intrusive.
- *   4. Gender (optional) — 4 chip choices matching the `gender`
- *      check constraint in profiles. "밝히지 않음" is a real value,
- *      not a skip — the difference matters for product analytics
- *      (skip = no data vs. prefer_not = explicit private choice).
+ *   1. Nickname (required) — used by all four characters.
+ *   2. Location (optional) — 3-level cascading dropdown
+ *      시/도 → 시군구 → 동. Each level filters the next.
+ *      PC users get the full drill-down precision; mobile users
+ *      will eventually skip this in favour of GPS (deferred).
+ *      Selecting only 시/도+시군구 (no 동) is OK — we save the
+ *      구 centroid as the location, which is plenty accurate for
+ *      weather grids.
+ *   3. Birth year (optional).
+ *   4. Gender (optional).
  *
- * Auth flow:
- *   - Signed-in users: payload persisted via POST /api/me/onboarding
- *     (server upserts profile via service-role client + sets
- *     onboarded_at). Always keeps localStorage in sync so the rest
- *     of the app can read instantly without a round-trip.
- *   - Anonymous users: localStorage only. The data is lost if they
- *     never sign up, which is the right trade — we don't want to
- *     orphan profile rows for visitors who never converted.
- *
- * UX rules:
- *   - Nickname is the only required field. Everything else can be
- *     left blank and the form still submits.
- *   - Enter on the nickname input submits the form (low-friction
- *     for users who don't want to fill the optional sections).
+ * The 3rd dropdown is *adaptive*: if the picked 구 doesn't have
+ * any curated 동 entries (most rural counties), the 동 select
+ * collapses entirely instead of showing an empty list — avoids a
+ * dead UI element.
  */
 type Gender = 'female' | 'male' | 'nonbinary' | 'prefer_not';
 
@@ -58,34 +45,61 @@ interface LocationPick {
 
 const CURRENT_YEAR = new Date().getFullYear();
 const MIN_YEAR = CURRENT_YEAR - 100;
-const MAX_YEAR = CURRENT_YEAR - 7; // soft floor — under-7 is implausible for this product
+const MAX_YEAR = CURRENT_YEAR - 7;
 
 export default function OnboardingPage() {
   const router = useRouter();
   const [nickname, setNickname] = useState('');
   const [birthYear, setBirthYear] = useState<string>('');
   const [gender, setGender] = useState<Gender | null>(null);
-  const [location, setLocation] = useState<LocationPick | null>(null);
+
+  // Cascading region state. Each level is independent so the user
+  // can re-pick higher tiers without losing lower-tier defaults.
+  const [provinceCode, setProvinceCode] = useState<string>('');
+  const [sggCode, setSggCode] = useState<string>('');
+  const [dongId, setDongId] = useState<string>('');
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Prefill from localStorage so a returning user doesn't have to
-  // re-type their nickname. The DB is the source of truth when
-  // signed in, but the page loads before the auth round-trip
-  // completes, so we use localStorage as the warm-start cache.
+  // Derived data — recomputed only when the parent select changes.
+  const sggOptions = useMemo<SggChoice[]>(
+    () => (provinceCode ? getSggsForProvince(provinceCode) : []),
+    [provinceCode],
+  );
+  const dongOptions = useMemo<DongChoice[]>(
+    () => (sggCode ? getDongsForSgg(sggCode) : []),
+    [sggCode],
+  );
+
+  // Effective location: 동 wins, then 구, then nothing.
+  const location = useMemo<LocationPick | null>(() => {
+    if (dongId) {
+      const d = dongOptions.find((x) => x.id === dongId);
+      if (d) return { lat: d.lat, lng: d.lng, label: d.fullLabel };
+    }
+    if (sggCode) {
+      const s = sggOptions.find((x) => x.code === sggCode);
+      if (s) return { lat: s.lat, lng: s.lng, label: s.fullLabel };
+    }
+    return null;
+  }, [dongId, sggCode, sggOptions, dongOptions]);
+
   useEffect(() => {
     const existing = localStorage.getItem('wi.nickname');
     if (existing) setNickname(existing);
   }, []);
 
-  function pickCity(cityId: string) {
-    if (!cityId) {
-      setLocation(null);
-      return;
-    }
-    const city = KR_CITIES.find((c) => c.id === cityId);
-    if (!city) return;
-    setLocation({ lat: city.lat, lng: city.lng, label: city.label });
+  // Reset the dependent selects whenever the parent changes — so
+  // picking a new 시/도 doesn't leave a stale 시군구/동 hanging.
+  function onProvinceChange(code: string) {
+    setProvinceCode(code);
+    setSggCode('');
+    setDongId('');
+  }
+  function onSggChange(code: string) {
+    setSggCode(code);
+    setDongId('');
   }
 
   async function complete() {
@@ -95,8 +109,6 @@ export default function OnboardingPage() {
     setSubmitting(true);
     setError(null);
 
-    // Always cache locally — the chat client + characters page read
-    // the nickname from localStorage for instant render.
     localStorage.setItem('wi.nickname', nick);
     localStorage.setItem('wi.onboarded', '1');
     if (location) {
@@ -106,9 +118,6 @@ export default function OnboardingPage() {
       );
     }
 
-    // Persist server-side if signed in. We don't fail the form when
-    // the persistence fails — local data is enough for the app to
-    // run; the user can re-save from /account later.
     try {
       const supabase = getBrowserSupabase();
       const { data } = supabase ? await supabase.auth.getUser() : { data: { user: null } };
@@ -132,7 +141,6 @@ export default function OnboardingPage() {
         if (!res.ok) {
           const j = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
           console.warn('[onboarding] save failed', j.error?.message);
-          // Non-fatal — surface a soft warning but proceed to /characters.
         }
       }
     } catch (err) {
@@ -161,7 +169,7 @@ export default function OnboardingPage() {
           모두 건너뛸 수 있고 언제든 바꿀 수 있어요.
         </p>
 
-        {/* ── 1. Nickname (required) ─────────────────────────────── */}
+        {/* ── 1. Nickname ─────────────────────────────────────────── */}
         <section className="mt-12 flex flex-col gap-3">
           <label className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft">
             ① 닉네임 · Nickname (필수)
@@ -179,33 +187,72 @@ export default function OnboardingPage() {
           />
         </section>
 
-        {/* ── 2. Location (optional, dropdown only) ──────────────── */}
-        {/* 16-city dropdown — see the file-header JSDoc for why we
-            deliberately skip browser geolocation here. The user
-            knows their own city; a single select is the lowest-
-            friction control to capture it. */}
+        {/* ── 2. Location — 3-level cascading dropdown ───────────── */}
         <section className="mt-10 flex flex-col gap-3">
           <label className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft">
             ② 위치 · Location (선택, 동네 날씨에 맞춰 대화해요)
           </label>
-          <select
-            value={
-              location
-                ? (KR_CITIES.find(
-                    (c) => c.lat === location.lat && c.lng === location.lng,
-                  )?.id ?? '')
-                : ''
-            }
-            onChange={(e) => pickCity(e.target.value)}
-            className="h-12 w-full appearance-none rounded-full border border-brand-ink/15 bg-white px-5 font-sans text-[15px] text-brand-ink outline-none transition focus:border-brand-ink/30"
-          >
-            <option value="">선택 안 함 (기본: 서울 강남구)</option>
-            {KR_CITIES.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.label}
+          <p className="font-sans text-[12px] text-brand-ink-soft">
+            시/도 → 시·군·구 → 동까지 선택. 동이 없는 지역은 시·군·구까지만 골라도 OK.
+            <br />
+            <span className="text-brand-ink-soft/70">
+              모바일에서는 추후 GPS로 자동 인식 지원 예정.
+            </span>
+          </p>
+
+          <div className="grid grid-cols-1 gap-2 md:grid-cols-3">
+            {/* 시/도 */}
+            <select
+              value={provinceCode}
+              onChange={(e) => onProvinceChange(e.target.value)}
+              className="h-12 appearance-none rounded-full border border-brand-ink/15 bg-white px-4 font-sans text-[14px] text-brand-ink outline-none transition focus:border-brand-ink/30"
+            >
+              <option value="">시/도 선택</option>
+              {PROVINCES.map((p) => (
+                <option key={p.code} value={p.code}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+
+            {/* 시·군·구 — only enabled when a province is chosen */}
+            <select
+              value={sggCode}
+              onChange={(e) => onSggChange(e.target.value)}
+              disabled={!provinceCode}
+              className="h-12 appearance-none rounded-full border border-brand-ink/15 bg-white px-4 font-sans text-[14px] text-brand-ink outline-none transition focus:border-brand-ink/30 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <option value="">시·군·구 선택</option>
+              {sggOptions.map((s) => (
+                <option key={s.code} value={s.code}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+
+            {/* 동 — disabled if no 동 data for this 구 */}
+            <select
+              value={dongId}
+              onChange={(e) => setDongId(e.target.value)}
+              disabled={!sggCode || dongOptions.length === 0}
+              className="h-12 appearance-none rounded-full border border-brand-ink/15 bg-white px-4 font-sans text-[14px] text-brand-ink outline-none transition focus:border-brand-ink/30 disabled:cursor-not-allowed disabled:opacity-50"
+              title={
+                sggCode && dongOptions.length === 0
+                  ? '이 지역은 동 데이터가 아직 없어요'
+                  : undefined
+              }
+            >
+              <option value="">
+                {sggCode && dongOptions.length === 0 ? '동 데이터 없음' : '동 선택 (선택)'}
               </option>
-            ))}
-          </select>
+              {dongOptions.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
           {location ? (
             <p className="font-sans text-[12px] text-brand-ink-soft">
               선택됨: <span className="text-brand-ink">{location.label}</span>
@@ -213,7 +260,7 @@ export default function OnboardingPage() {
           ) : null}
         </section>
 
-        {/* ── 3. Birth year (optional) ──────────────────────────── */}
+        {/* ── 3. Birth year ───────────────────────────────────────── */}
         <section className="mt-10 flex flex-col gap-3">
           <label className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft">
             ③ 태어난 해 · Birth Year (선택)
@@ -231,7 +278,7 @@ export default function OnboardingPage() {
           </p>
         </section>
 
-        {/* ── 4. Gender (optional) ──────────────────────────────── */}
+        {/* ── 4. Gender ───────────────────────────────────────────── */}
         <section className="mt-10 flex flex-col gap-3">
           <label className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft">
             ④ 성별 · Gender (선택)
@@ -267,7 +314,6 @@ export default function OnboardingPage() {
           </div>
         ) : null}
 
-        {/* ── Submit ─────────────────────────────────────────────── */}
         <div className="mt-12 flex flex-col gap-3 md:flex-row md:items-center">
           <Button
             variant="accent"
