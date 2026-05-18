@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useEffect, useMemo, useState } from 'react';
 
@@ -59,6 +60,14 @@ export default function OnboardingPage() {
   const [sggCode, setSggCode] = useState<string>('');
   const [dongId, setDongId] = useState<string>('');
 
+  // Three legally-required consents bundled into a single state
+  // toggle. The UI shows three labelled checkboxes with view-document
+  // links, but they're either all-on or all-off so the user can't
+  // partially accept (the documents reference each other and can't
+  // function independently). The actual timestamp + version is set
+  // server-side at /api/me/onboarding submission time.
+  const [agreed, setAgreed] = useState(false);
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -105,6 +114,15 @@ export default function OnboardingPage() {
   async function complete() {
     const nick = nickname.trim();
     if (!nick) return;
+    if (!agreed) {
+      // Belt-and-suspenders — the submit button is also disabled
+      // when this is false, but a determined user could trigger the
+      // form via Enter on the nickname field. Refuse server-side
+      // submission too (server validates `termsAccepted: true` in
+      // /api/me/onboarding).
+      setError('이용약관·개인정보처리방침·저작권 정책에 동의해주세요.');
+      return;
+    }
 
     setSubmitting(true);
     setError(null);
@@ -136,6 +154,12 @@ export default function OnboardingPage() {
             location: location
               ? { lat: location.lat, lng: location.lng, label: location.label }
               : null,
+            // Bundled consent — server stamps profiles.terms_accepted_at
+            // + terms_version. Must be true at this point because the
+            // client-side gate above blocks submission otherwise; we
+            // still send it explicitly so the server can verify and
+            // also re-confirm with the current LEGAL.version string.
+            termsAccepted: true,
           }),
         });
         if (!res.ok) {
@@ -308,6 +332,70 @@ export default function OnboardingPage() {
           </div>
         </section>
 
+        {/* ── 5. Legal consent ────────────────────────────────────
+            Three documents bundled into a single checkbox — the
+            documents are interdependent (저작권 정책 refers to
+            이용약관, 처리방침 sits inside both) so partial consent
+            doesn't make legal sense. The "필수" suffix mirrors
+            Korean app convention where multi-checkbox consent
+            sections label each item 필수/선택. */}
+        <section className="mt-10 flex flex-col gap-3">
+          <label className="font-mono text-[11px] uppercase tracking-eyebrow text-brand-ink-soft">
+            ⑤ 약관 동의 (필수)
+          </label>
+          <label
+            className={`flex cursor-pointer items-start gap-3 rounded-2xl border p-4 transition ${
+              agreed
+                ? 'border-brand-accent bg-brand-accent/5'
+                : 'border-brand-ink/15 bg-white hover:border-brand-ink/30'
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={agreed}
+              onChange={(e) => setAgreed(e.target.checked)}
+              className="mt-0.5 h-5 w-5 cursor-pointer accent-brand-accent"
+              aria-label="이용약관 · 개인정보처리방침 · 저작권 정책에 동의"
+            />
+            <div className="flex-1">
+              <p className="font-sans text-[14px] font-medium text-brand-ink">
+                <span className="text-red-600">[필수]</span> 만 14세 이상이며,
+                아래 약관에 모두 동의합니다.
+              </p>
+              <p className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 font-sans text-[12px] text-brand-ink-soft">
+                <Link
+                  href="/terms"
+                  target="_blank"
+                  className="underline underline-offset-2 hover:text-brand-ink"
+                >
+                  이용약관 보기 ↗
+                </Link>
+                <span className="text-brand-ink/15">·</span>
+                <Link
+                  href="/privacy"
+                  target="_blank"
+                  className="underline underline-offset-2 hover:text-brand-ink"
+                >
+                  개인정보처리방침 보기 ↗
+                </Link>
+                <span className="text-brand-ink/15">·</span>
+                <Link
+                  href="/copyright"
+                  target="_blank"
+                  className="underline underline-offset-2 hover:text-brand-ink"
+                >
+                  저작권 정책 보기 ↗
+                </Link>
+              </p>
+              <p className="mt-2 font-sans text-[12px] leading-relaxed text-brand-ink-soft">
+                저작권 정책 요약: 생성되는 모든 콘텐츠의 저작권은 케이웨더(주)에
+                귀속됩니다. 단 회원은 자신이 받은 파일을 보유하고 비영리
+                목적으로 게시·공유할 수 있습니다.
+              </p>
+            </div>
+          </label>
+        </section>
+
         {error ? (
           <div className="mt-6 rounded-2xl border border-red-300/40 bg-red-50/50 px-4 py-3 font-sans text-[13px] text-red-700">
             {error}
@@ -319,12 +407,12 @@ export default function OnboardingPage() {
             variant="accent"
             size="lg"
             onClick={complete}
-            disabled={!nickname.trim() || submitting}
+            disabled={!nickname.trim() || !agreed || submitting}
           >
             {submitting ? '저장 중…' : '시작하기 →'}
           </Button>
           <span className="font-sans text-[13px] text-brand-ink-soft">
-            닉네임만 입력해도 진행 가능해요
+            닉네임 입력 + 약관 동의 후 진행 가능
           </span>
         </div>
       </div>

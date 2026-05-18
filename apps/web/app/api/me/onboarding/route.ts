@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 
+import { LEGAL } from '@/app/(legal)/legal-meta';
 import { saveOnboarding } from '@/lib/profile';
 import { resolveUser } from '@/lib/supabase/identity';
 
@@ -27,6 +28,8 @@ interface Body {
   birthYear?: number | null;
   gender?: string | null;
   location?: { lat?: number; lng?: number; label?: string } | null;
+  /** Bundled consent — true means user agreed to terms + privacy + copyright. */
+  termsAccepted?: boolean;
 }
 
 const VALID_GENDERS = ['female', 'male', 'nonbinary', 'prefer_not'] as const;
@@ -107,12 +110,30 @@ export async function POST(req: Request): Promise<Response> {
     };
   }
 
+  // Server-side guard mirroring the client gate: refuse to record
+  // an onboarding submission without explicit consent. Tightly
+  // scoped — we only stamp the version when termsAccepted === true,
+  // so a legacy update that omits the field doesn't accidentally
+  // re-stamp the timestamp.
+  if (body.termsAccepted !== true) {
+    return NextResponse.json(
+      {
+        error: {
+          code: 'consent_required',
+          message: '이용약관·개인정보처리방침·저작권 정책에 동의해주세요.',
+        },
+      },
+      { status: 400 },
+    );
+  }
+
   const result = await saveOnboarding({
     userId: caller.id,
     nickname,
     birthYear,
     gender,
     location,
+    termsVersion: LEGAL.version,
   });
 
   if (!result.ok) {

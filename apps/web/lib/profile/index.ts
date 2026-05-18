@@ -60,6 +60,14 @@ export interface SaveOnboardingInput {
   birthYear?: number | null;
   gender?: 'female' | 'male' | 'nonbinary' | 'prefer_not' | null;
   location?: ProfileLocation | null;
+  /**
+   * The legal-doc bundle version the user agreed to. Stored in
+   * profiles.terms_version so a future doc revision can detect users
+   * who accepted an older bundle and prompt re-consent. Omitted
+   * input means "no new consent on this save" — we don't clobber an
+   * existing timestamp.
+   */
+  termsVersion?: string;
 }
 
 /**
@@ -93,6 +101,12 @@ export async function saveOnboarding(
     update.primary_lat = input.location.lat;
     update.primary_lng = input.location.lng;
     update.primary_label = input.location.label ?? null;
+  }
+  if (input.termsVersion) {
+    // Stamp the consent moment + the doc bundle version. Both
+    // columns added in supabase/migrations/20260518000001_profiles_consent_columns.
+    update.terms_accepted_at = new Date().toISOString();
+    update.terms_version = input.termsVersion;
   }
 
   const { error } = await svc.from('profiles').update(update).eq('id', input.userId);

@@ -6,6 +6,8 @@ import {
   Playfair_Display,
 } from 'next/font/google';
 
+import SiteFooter from '@/components/SiteFooter';
+
 import './globals.css';
 
 // ── Type stack rationale ──────────────────────────────────────────────
@@ -83,7 +85,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       lang="ko"
       className={`${display.variable} ${sans.variable} ${sansKr.variable} ${mono.variable}`}
     >
-      <body>{children}</body>
+      {/* min-h-screen + flex column so the SiteFooter sits at the bottom
+          of pages whose content is shorter than the viewport, while
+          longer pages still scroll naturally. The chat page's
+          fullscreen layout escapes this with its own absolute
+          positioning, but every other route benefits from a
+          predictably-pinned footer. */}
+      <body className="flex min-h-screen flex-col">
+        <div className="flex-1">{children}</div>
+        <SiteFooter />
+      </body>
     </html>
   );
 }
