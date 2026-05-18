@@ -445,7 +445,7 @@ function computeRenderInfo(messages: UIMessage[]): RenderInfo[] {
     //      time so we don't display one.
     //   2. pending=true → the assistant bubble is still streaming;
     //      its "finished at" time isn't meaningful yet.
-    let showTime = isLastInRun && !m.legacyTime && !m.pending;
+    const showTime = isLastInRun && !m.legacyTime && !m.pending;
 
     return {
       showDateDivider,
