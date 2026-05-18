@@ -312,6 +312,97 @@ function saveHistory(characterId: string, messages: UIMessage[]) {
   localStorage.setItem(storageKey(characterId), JSON.stringify(messages.slice(-50)));
 }
 
+/**
+ * Fire-and-forget rolling memory updater.
+ *
+ * Goal: keep a one-paragraph third-person "what the character knows
+ * about this user" note for each character, stashed in localStorage
+ * and shipped alongside `history` on every chat turn. Without this,
+ * anything older than the HISTORY_WINDOW (20 turns) would be
+ * invisible to the LLM forever.
+ *
+ * Strategy:
+ *   - Only invoke when message count exceeds the window AND the
+ *     count has grown by >= 5 since the last summarisation (tracked
+ *     via `wi.memory.${charId}.snapshotAt`). Avoids hammering Gemini
+ *     on every single turn.
+ *   - Sends the FULL message list to /api/chat/summarize — the
+ *     server-side endpoint handles input trimming + merging with
+ *     existing summary.
+ *   - On success: write the new summary back to localStorage. Next
+ *     send() reads it.
+ *   - On failure: silent. The chat continues working, the user just
+ *     loses long-term memory.
+ *
+ * "fire-and-forget" — the caller does `void maybeUpdateMemorySummary(...)`
+ * after the chat stream completes, so this NEVER blocks user-visible
+ * interactions.
+ */
+async function maybeUpdateMemorySummary(args: {
+  characterId: string;
+  messages: UIMessage[];
+  nickname: string;
+  windowSize: number;
+}): Promise<void> {
+  if (typeof window === 'undefined') return;
+  const { characterId, messages, nickname, windowSize } = args;
+
+  // We only have something to summarise if there are messages
+  // BEYOND the sliding window — otherwise everything's already in
+  // history and the memory note would just duplicate.
+  const textTurns = messages.filter(
+    (m) =>
+      (m.role === 'user' || m.role === 'assistant') &&
+      m.kind === 'text' &&
+      m.content &&
+      m.content.trim().length > 0,
+  );
+  if (textTurns.length <= windowSize) return;
+
+  // Rate-limit: only re-summarise when we've gained ≥5 new turns
+  // since the last summary.
+  const snapshotKey = `wi.memory.${characterId}.snapshotAt`;
+  const summaryKey = `wi.memory.${characterId}`;
+  const lastSnapshot = Number.parseInt(
+    localStorage.getItem(snapshotKey) ?? '0',
+    10,
+  );
+  if (Number.isFinite(lastSnapshot) && textTurns.length - lastSnapshot < 5) {
+    return;
+  }
+
+  // Slice: include the entire conversation older than the current
+  // sliding window. The server endpoint merges with existing summary
+  // so duplication is fine.
+  const olderThanWindow = textTurns.slice(0, -windowSize);
+  if (olderThanWindow.length < 4) return;
+
+  const existing = localStorage.getItem(summaryKey) ?? undefined;
+  try {
+    const res = await fetch('/api/chat/summarize', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        characterId,
+        nickname,
+        existingSummary: existing,
+        messages: olderThanWindow.map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
+      }),
+    });
+    if (!res.ok) return;
+    const data = (await res.json()) as { summary?: string | null };
+    if (typeof data.summary !== 'string' || !data.summary.trim()) return;
+    localStorage.setItem(summaryKey, data.summary.trim());
+    localStorage.setItem(snapshotKey, String(textTurns.length));
+  } catch {
+    /* fire-and-forget — silent failure */
+  }
+}
+
 // ── KakaoTalk-style time / date formatting + grouping ─────────────────
 
 /**
@@ -1224,6 +1315,61 @@ export default function ChatClient({ character }: { character: Character }) {
       /* fall through — server cascade still picks up profile location */
     }
 
+    // ── Build conversation history for the LLM ──────────────────
+    //
+    // The "맥락이 끊긴다" bug: until now /api/chat always passed
+    // `history: []` to the adapter, so every turn looked like a
+    // brand-new conversation. We now ship the recent sliding window
+    // plus an optional rolling memory summary so the character can
+    // reference what was said two minutes ago — and even thirty
+    // turns ago via the compressed memory.
+    //
+    //   - HISTORY_WINDOW: last 20 text-bearing messages. Keeps the
+    //     prompt size bounded (~2-3K tokens worst case at the
+    //     existing 16px bubble length). Tunable later if Premium
+    //     gets a bigger context budget.
+    //   - We use the messages array BEFORE this turn was pushed
+    //     (we just appended the user's new message a few lines
+    //     above); slicing from `messages` here would include the
+    //     fresh user bubble as a history entry AND we'd duplicate
+    //     it via the `userMessage` field on the adapter input. So
+    //     we filter out the message we just sent (id === userId)
+    //     and the empty assistant placeholder (id === assistantId).
+    //   - Non-text bubbles (셀카, 노래, 상품 카드) get rendered as
+    //     short placeholder strings so the LLM at least knows
+    //     "사진을 보냈음" happened in the chronology.
+    const HISTORY_WINDOW = 20;
+    const history = messages
+      .filter((m) => m.id !== userId && m.id !== assistantId)
+      .slice(-HISTORY_WINDOW)
+      .map((m) => ({
+        role: m.role,
+        content:
+          m.content && m.content.trim().length > 0
+            ? m.content
+            : m.kind === 'image'
+              ? '[사진]'
+              : m.kind === 'product'
+                ? '[상품 추천 카드]'
+                : m.kind === 'music'
+                  ? '[날씨송]'
+                  : '',
+        modality: m.kind === 'text' ? 'text' : m.kind,
+      }))
+      .filter((m) => m.content.length > 0);
+
+    // Load any previously-summarised memory for this character.
+    // Updated asynchronously after each successful chat turn
+    // (see the summariseIfNeeded() call further down) so the next
+    // request picks up a fresher memory string.
+    const memorySummary = (() => {
+      try {
+        return localStorage.getItem(`wi.memory.${character.id}`) ?? undefined;
+      } catch {
+        return undefined;
+      }
+    })();
+
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
@@ -1234,6 +1380,8 @@ export default function ChatClient({ character }: { character: Character }) {
           nickname,
           imageDataUrl: attachedImage ?? undefined,
           locationHint,
+          history,
+          memorySummary,
         }),
       });
       // Pull quota state from response headers — every /api/chat
@@ -1330,6 +1478,23 @@ export default function ChatClient({ character }: { character: Character }) {
       }
 
       setUsage(bumpTodayCount());
+
+      // Memory roll-up — fire-and-forget. When the conversation has
+      // pushed past the sliding window we just sent (HISTORY_WINDOW
+      // = 20), the messages that fell off the front would otherwise
+      // be invisible to the LLM forever. Compress them into a short
+      // memory note via /api/chat/summarize and stash it in
+      // localStorage; next turn's send() reads it back and ships it
+      // as `memorySummary`. Triggered every ~5 turns past the window
+      // to avoid hammering Gemini on every keystroke. The call is
+      // async with no UI dependency — if it fails, the chat still
+      // works, the user just loses memory of older turns.
+      void maybeUpdateMemorySummary({
+        characterId: character.id,
+        messages,
+        nickname,
+        windowSize: HISTORY_WINDOW,
+      });
 
       if (productCard) {
         setMessages((prev) => [

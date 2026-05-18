@@ -30,6 +30,29 @@ interface ChatBody {
    * the Anthropic / Gemini payload limits.
    */
   imageDataUrl?: string;
+  /**
+   * Recent conversation turns the client wants the model to see for
+   * context. Client trims to a sliding window (last ~20 messages,
+   * text-only) so the prompt size stays bounded. Without this, the
+   * server used to pass `history: []` to the adapter and every turn
+   * looked like a brand-new conversation to the LLM — the
+   * "맥락이 계속 끊기는" bug. We accept the simplified shape (just
+   * role + content + modality) and inflate to the full Message[]
+   * the adapter expects.
+   */
+  history?: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+    modality?: 'text' | 'image' | 'product' | 'song' | 'video';
+  }>;
+  /**
+   * Rolling summary of conversation turns that fell off the sliding
+   * window — written by /api/chat/summarize and cached client-side
+   * per character. Slots into the [Memory] block in the system
+   * prompt so the character "remembers" facts from 30+ turns ago
+   * without us shipping all those tokens every request.
+   */
+  memorySummary?: string;
 }
 
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
@@ -229,11 +252,43 @@ export async function POST(req: Request): Promise<Response> {
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
       }
       try {
+        // Inflate the lightweight client-side history shape to the
+        // full Message[] the adapter expects. Stub the id /
+        // sessionId / timestamps — buildPrompt() doesn't read them,
+        // it only touches role + content + modality. Caps at the
+        // client-provided length (which is already bounded to ~20),
+        // and double-trims server-side as a safety net so a hostile
+        // client can't blow up the prompt by submitting a giant
+        // history array.
+        const HISTORY_HARD_CAP = 30;
+        const adapterHistory = (body.history ?? [])
+          .slice(-HISTORY_HARD_CAP)
+          .filter((m) => m && (m.role === 'user' || m.role === 'assistant'))
+          .map((m, i) => ({
+            id: `client-${i}`,
+            sessionId: '',
+            role: m.role,
+            modality: (m.modality ?? 'text') as
+              | 'text'
+              | 'image'
+              | 'product'
+              | 'song'
+              | 'video',
+            content: typeof m.content === 'string' ? m.content : '',
+            metadata: null,
+            createdAt: '',
+          }));
+
         for await (const evt of adapter.stream({
           character,
           characterSystemPrompt: SYSTEM_PROMPTS[character.id],
           weather,
-          history: [],
+          history: adapterHistory,
+          memorySummary:
+            typeof body.memorySummary === 'string' &&
+            body.memorySummary.trim().length > 0
+              ? body.memorySummary.slice(0, 4000) // hard cap, just in case
+              : undefined,
           // localTime is for the LLM's [Now Context] block. Always KST —
           // server runs in UTC on Vercel, but our characters live in 한국.
           user: {
