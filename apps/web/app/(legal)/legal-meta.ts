@@ -18,10 +18,13 @@ export const LEGAL = {
     '서울특별시 구로구 디지털로26길 5, 4층 401호 (구로동, 에이스하이엔드타워)',
   /** Customer support / data-protection contact. */
   contactEmail: 'admin@wellbianlabs.io',
-  /** Legally-required role under PIPA(개인정보보호법). Same person as
-   *  the rep for now; can be split later if we hire a dedicated DPO. */
-  dpoName: '김동식',
-  dpoTitle: '대표이사',
+  /** Legally-required role under PIPA(개인정보보호법). Distinct from
+   *  the corporate representative — the DPO is the operational
+   *  contact for data-protection requests (열람·정정·삭제·처리정지)
+   *  and breach incidents. Reachable via the shared admin@
+   *  customer-support inbox below. */
+  dpoName: '이창민',
+  dpoTitle: '부장',
 
   /** Service display name in legal text. */
   serviceName: '날씨의 아이돌 챗 (Weather Idols Chat)',
