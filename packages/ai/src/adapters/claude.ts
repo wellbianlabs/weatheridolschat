@@ -183,11 +183,30 @@ export function createClaudeAdapter(apiKey: string): ChatAdapter {
           return `${input.userImage ? '사진 처리에' : '응답 생성에'} 문제가 있었어요. (${apiMsg.slice(0, 160)})`;
         })();
 
-        for (const c of userMsg) yield { type: 'token', delta: c };
+        // CHANGED — previously the error message was streamed
+        // character-by-character as `{type:'token'}` so the user saw
+        // a Korean error string in the chat bubble. That blocked the
+        // chat route from doing transparent provider fallback: by
+        // the time the `error` event arrived, the error text was
+        // already on the client. Now we yield ONLY the `error`
+        // event (with the user-facing Korean copy in `message`).
+        //
+        // Upstream behaviour (in /api/chat/route.ts):
+        //   - If NO tokens were forwarded yet and a fallback adapter
+        //     is configured (e.g. Gemini), the route silently retries
+        //     with the fallback. User sees Gemini's response with no
+        //     intermediate error.
+        //   - If tokens already streamed (mid-stream failure) or no
+        //     fallback is configured, the route forwards the error
+        //     event to the client; chat-client.tsx then renders it as
+        //     "응답을 받지 못했어요. (<message>)" inside the bubble.
         yield {
           type: 'error',
           code: 'provider_error',
-          message: fullMsg,
+          // The friendly Korean copy travels in `message`. The raw
+          // status/type/msg stays only in the [claude] log line above
+          // for admin diagnosis.
+          message: userMsg,
         };
         yield { type: 'done', finishReason: 'error' };
       }

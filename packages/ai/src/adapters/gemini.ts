@@ -206,8 +206,11 @@ export function createGeminiAdapter(apiKey: string): ChatAdapter {
         : msg.toLowerCase().includes('not found') || msg.includes('404')
           ? '어… 모델 연결이 잠깐 끊겼어. 운영자에게 알려줄래?'
           : '미안, 잠깐 신호가 약했어. 다시 한 번 보내줄래?';
-      for (const c of userMsg) yield { type: 'token', delta: c };
-      yield { type: 'error', code: 'provider_error', message: msg };
+      // CHANGED — see the matching comment in claude.ts. Error event
+      // carries the friendly Korean copy; we no longer pre-stream it
+      // as tokens, so the chat route can do silent provider fallback
+      // when the primary fails before any real model output landed.
+      yield { type: 'error', code: 'provider_error', message: userMsg };
       yield { type: 'done', finishReason: 'error' };
     },
   };

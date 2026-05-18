@@ -41,6 +41,43 @@ export function pickChatAdapter(opts: RouterOptions): ChatAdapter {
   return MockChatAdapter;
 }
 
+/**
+ * Choose a fallback chat adapter for when the primary one fails
+ * before producing any real model output. Used by /api/chat to do
+ * silent provider switching — if Anthropic is rate-limited or
+ * down, retry the same turn on Gemini and the user never sees the
+ * outage.
+ *
+ * Returns null when:
+ *   - mockMode is on (mock can't fail in a way fallback would help)
+ *   - the primary IS already the mock adapter
+ *   - the other provider's key is not configured (e.g. only Claude
+ *     key set — no Gemini fallback to switch to)
+ *
+ * Asymmetry to note: Claude → Gemini fallback is a quality drop
+ * (premium model → free-tier model), but it beats the user seeing a
+ * raw "Claude server unstable" error. We accept the quality drop
+ * because availability > quality for a single failed turn. Gemini →
+ * Claude fallback (Free user hits Gemini outage → Claude rescues)
+ * happens to be a quality UP, which is a nice side benefit.
+ */
+export function pickFallbackAdapter(opts: {
+  primaryId: 'claude' | 'gemini' | 'mock';
+  mockMode?: boolean;
+  anthropicApiKey?: string;
+  geminiApiKey?: string;
+}): ChatAdapter | null {
+  if (opts.mockMode) return null;
+  if (opts.primaryId === 'mock') return null;
+  if (opts.primaryId === 'claude' && opts.geminiApiKey) {
+    return createGeminiAdapter(opts.geminiApiKey);
+  }
+  if (opts.primaryId === 'gemini' && opts.anthropicApiKey) {
+    return createClaudeAdapter(opts.anthropicApiKey);
+  }
+  return null;
+}
+
 export function pickImageAdapter(opts: {
   mockMode?: boolean;
   openaiApiKey?: string;

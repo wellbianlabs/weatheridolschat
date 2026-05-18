@@ -10,7 +10,7 @@ import { getProfileLocation } from '@/lib/profile';
 import { consumeQuota, quotaHeaders, type QuotaResult } from '@/lib/quota';
 import { resolveUser } from '@/lib/supabase/identity';
 import { getServiceSupabase } from '@/lib/supabase/service';
-import { pickChatAdapter, SYSTEM_PROMPTS } from '@wi/ai';
+import { pickChatAdapter, pickFallbackAdapter, SYSTEM_PROMPTS } from '@wi/ai';
 import { getCurrentWeather } from '@wi/weather';
 
 export const runtime = 'nodejs';
@@ -279,7 +279,23 @@ export async function POST(req: Request): Promise<Response> {
             createdAt: '',
           }));
 
-        for await (const evt of adapter.stream({
+        // ── Adapter stream + transparent fallback ─────────────────
+        //
+        // Try the primary adapter (Claude for Premium, Gemini for
+        // Free — see pickChatAdapter). If it fails BEFORE forwarding
+        // any real tokens, switch to the alternate provider and
+        // retry from scratch. The user sees Gemini's reply with no
+        // intermediate error — the most common "Anthropic 막혔어"
+        // failures (rate limit, billing, transient 5xx) recover
+        // invisibly.
+        //
+        // Mid-stream failures (some tokens already streamed to client,
+        // then connection dies) don't fall back — the partial output
+        // is already on screen and dropping a Gemini response after
+        // it would be more disorienting than a brief error message.
+        // In that case we forward the adapter's `error` event and the
+        // chat-client renders "응답을 받지 못했어요. (…)".
+        const adapterInput = {
           character,
           characterSystemPrompt: SYSTEM_PROMPTS[character.id],
           weather,
@@ -293,7 +309,7 @@ export async function POST(req: Request): Promise<Response> {
           // server runs in UTC on Vercel, but our characters live in 한국.
           user: {
             nickname,
-            locale: 'ko',
+            locale: 'ko' as const,
             localTime: formatKstLocalTime(),
             // Rich context (time-of-day bucket, weekend flag, season)
             // — drives the [Now Context] block in the system prompt
@@ -306,8 +322,79 @@ export async function POST(req: Request): Promise<Response> {
           userMessage: text,
           userImage,
           ids: { userMessageId, assistantMessageId },
-        })) {
-          send(evt);
+        };
+
+        const fallbackAdapter = pickFallbackAdapter({
+          primaryId: adapter.id,
+          mockMode,
+          anthropicApiKey,
+          // Vision turns deliberately exclude Gemini fallback —
+          // multimodal handoff between Claude (which got the image
+          // attached) and Gemini (which wouldn't) would confuse the
+          // model. Stick to Claude only when there's a photo.
+          geminiApiKey: userImage ? undefined : geminiApiKey,
+        });
+
+        // Run primary adapter. Buffer tokens before forwarding only
+        // enough to know "did the primary actually start producing
+        // output". `forwardedTokens` flips to true the moment we send
+        // the first real token through. Until then, an `error` event
+        // means "primary failed early" → try fallback.
+        let forwardedTokens = false;
+        let primaryFailed = false;
+        let primaryFailedMessage: string | undefined;
+
+        for await (const evt of adapter.stream(adapterInput)) {
+          if (evt.type === 'token') {
+            forwardedTokens = true;
+            send(evt);
+          } else if (
+            evt.type === 'error' &&
+            !forwardedTokens &&
+            fallbackAdapter
+          ) {
+            // Primary died before producing real output AND a
+            // fallback is available — eat the error event and
+            // restart with the fallback below. We deliberately do
+            // NOT forward the primary's `done` event (which the
+            // adapter yields after `error`) since the conversation
+            // isn't actually done from the client's perspective.
+            primaryFailed = true;
+            primaryFailedMessage = evt.message;
+            console.warn(
+              `[chat] primary=${adapter.id} failed early — falling back to ${fallbackAdapter.id}. cause="${(evt.message ?? '').slice(0, 120)}"`,
+            );
+            break;
+          } else if (evt.type === 'done' && primaryFailed) {
+            // Suppressed — fallback will emit its own done.
+            continue;
+          } else {
+            send(evt);
+          }
+        }
+
+        if (primaryFailed && fallbackAdapter) {
+          // Same input, different adapter. The new adapter yields
+          // its own `meta` event with its own model name — the chat
+          // client just ignores that field, so this is invisible UX.
+          for await (const evt of fallbackAdapter.stream(adapterInput)) {
+            if (evt.type === 'token') forwardedTokens = true;
+            send(evt);
+          }
+          console.info(
+            `[chat] fallback=${fallbackAdapter.id} OK after primary=${adapter.id} failed (msg="${(primaryFailedMessage ?? '').slice(0, 80)}")`,
+          );
+        } else if (primaryFailed) {
+          // No fallback available — replay the primary's error event
+          // to the client so it can render the friendly Korean
+          // message. The chat-client renders the message inside
+          // "응답을 받지 못했어요. (…)".
+          send({
+            type: 'error',
+            code: 'provider_error',
+            message: primaryFailedMessage ?? '응답을 받지 못했어요.',
+          });
+          send({ type: 'done', finishReason: 'error' });
         }
 
         // Post-stream side-effects based on the user's intent. Works
