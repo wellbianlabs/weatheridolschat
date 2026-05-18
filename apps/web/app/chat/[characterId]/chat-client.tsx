@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import type { Character, CharacterId } from '@wi/core/characters';
 import type { ProductPayload } from '@wi/core/chat';
@@ -858,43 +858,85 @@ export default function ChatClient({ character }: { character: Character }) {
     };
   }, []);
 
-  useEffect(() => {
+  /**
+   * Imperative scroll-to-bottom helper.
+   *
+   * `force=true`  → always pin to bottom, even if the user has
+   *                  scrolled up. Used on first mount and immediately
+   *                  after the user hits send — those are
+   *                  user-initiated focus events where the right
+   *                  default is "show me my latest line right above
+   *                  the input bar".
+   * `force=false` → respect the user's reading position. If they're
+   *                  more than 100px from the bottom (i.e. scrolled
+   *                  up to re-read older messages), do nothing.
+   *                  Used by the streaming auto-poll and by ambient
+   *                  events like a scheduled greeting landing — we
+   *                  don't want those to yank a reader away from
+   *                  what they're scanning.
+   */
+  const scrollToBottom = (opts: { force?: boolean; smooth?: boolean } = {}) => {
     const el = scrollRef.current;
     if (!el) return;
+    if (!opts.force) {
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (dist >= 100) return;
+    }
+    el.scrollTo({
+      top: el.scrollHeight,
+      behavior: opts.smooth ? 'smooth' : 'auto',
+    });
+  };
 
-    // Helper: "near bottom" = within 100px of the last message. We
-    // only auto-scroll when the user is already there; if they've
-    // scrolled up to read older messages, leave them alone instead
-    // of yanking them back to the live edge mid-read.
-    const isNearBottom = (n: HTMLDivElement) =>
-      n.scrollHeight - n.scrollTop - n.clientHeight < 100;
+  // First-render scroll. useLayoutEffect runs synchronously AFTER
+  // DOM updates but BEFORE the browser paints, so the user never
+  // sees a "scrolled to top" flash on entering the room. We use
+  // `behavior: 'auto'` here because there's no prior scroll position
+  // to animate from — smooth would just look like a quarter-second
+  // hesitation on first paint.
+  useLayoutEffect(() => {
+    scrollToBottom({ force: true, smooth: false });
+    // We deliberately want this to run ONCE on mount. messages will
+    // re-populate from localStorage via the loadHistory effect, and
+    // the on-messages effect below catches that change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-    // Initial smooth scroll whenever the messages array itself
-    // changes (new bubble appears, scheduled greeting lands, etc.).
-    if (isNearBottom(el)) {
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+  // After every messages-array change. Two regimes:
+  //
+  //   - When the LAST message is a user message we just sent, treat
+  //     it as "user-initiated focus" and force-scroll. The send()
+  //     function appends a user bubble + an assistant placeholder
+  //     in one setMessages call, so checking the second-to-last
+  //     entry is the most reliable signal that this update came
+  //     from a send.
+  //   - Otherwise (assistant token streaming, scheduled greeting
+  //     landing, etc.) honour the "user might be scrolled up reading"
+  //     gating via the non-force path.
+  //
+  // Also: while any message is pending we poll-scroll at 80ms ticks
+  // so the typewriter reveal in ChatBubble (which grows the bubble
+  // height incrementally via local state and doesn't re-fire this
+  // effect) doesn't cause a visible scroll lag.
+  useEffect(() => {
+    if (messages.length >= 2) {
+      const justSent = messages[messages.length - 2];
+      if (justSent && justSent.role === 'user') {
+        scrollToBottom({ force: true, smooth: true });
+      } else {
+        scrollToBottom({ smooth: true });
+      }
+    } else {
+      scrollToBottom({ smooth: true });
     }
 
-    // Keep nudging the bottom while any message is still being
-    // typewritten. The character-by-character reveal in ChatBubble
-    // grows the bubble's height incrementally, but that growth
-    // happens via local state and doesn't re-fire this effect —
-    // so without this interval, scroll lags behind the typewriter
-    // and the user has to manually scroll. 80ms tick is fast
-    // enough to be invisible, slow enough not to fight a user
-    // who has just scrolled away.
     const hasPending = messages.some((m) => m.pending);
     if (!hasPending) return;
     const id = window.setInterval(() => {
-      const cur = scrollRef.current;
-      if (!cur) return;
-      if (isNearBottom(cur)) {
-        // `behavior: 'auto'` (not smooth) inside the poll — repeated
-        // smooth scrolls fight each other and visibly stutter.
-        cur.scrollTo({ top: cur.scrollHeight, behavior: 'auto' });
-      }
+      scrollToBottom(); // gated, auto behavior — won't fight a user who scrolled up
     }, 80);
     return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages]);
 
   // ── Voice input (Web Speech API) ─────────────────────────────────
