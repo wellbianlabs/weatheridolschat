@@ -768,7 +768,42 @@ export default function ChatClient({ character }: { character: Character }) {
   }, []);
 
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+    const el = scrollRef.current;
+    if (!el) return;
+
+    // Helper: "near bottom" = within 100px of the last message. We
+    // only auto-scroll when the user is already there; if they've
+    // scrolled up to read older messages, leave them alone instead
+    // of yanking them back to the live edge mid-read.
+    const isNearBottom = (n: HTMLDivElement) =>
+      n.scrollHeight - n.scrollTop - n.clientHeight < 100;
+
+    // Initial smooth scroll whenever the messages array itself
+    // changes (new bubble appears, scheduled greeting lands, etc.).
+    if (isNearBottom(el)) {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
+    }
+
+    // Keep nudging the bottom while any message is still being
+    // typewritten. The character-by-character reveal in ChatBubble
+    // grows the bubble's height incrementally, but that growth
+    // happens via local state and doesn't re-fire this effect —
+    // so without this interval, scroll lags behind the typewriter
+    // and the user has to manually scroll. 80ms tick is fast
+    // enough to be invisible, slow enough not to fight a user
+    // who has just scrolled away.
+    const hasPending = messages.some((m) => m.pending);
+    if (!hasPending) return;
+    const id = window.setInterval(() => {
+      const cur = scrollRef.current;
+      if (!cur) return;
+      if (isNearBottom(cur)) {
+        // `behavior: 'auto'` (not smooth) inside the poll — repeated
+        // smooth scrolls fight each other and visibly stutter.
+        cur.scrollTo({ top: cur.scrollHeight, behavior: 'auto' });
+      }
+    }, 80);
+    return () => window.clearInterval(id);
   }, [messages]);
 
   // ── Voice input (Web Speech API) ─────────────────────────────────
@@ -1740,7 +1775,89 @@ function ChatBubble({
   onRegenerate: () => void;
   onPlayTts: (id: string) => void;
 }) {
+  // ── React Hooks (must come BEFORE any conditional return) ─────────
+  // The user-vs-assistant branch returns early below, so all hooks
+  // have to declare here unconditionally to satisfy rules-of-hooks.
+  // Sanitiser + revealed-state are only meaningful for the assistant
+  // branch; for user messages they compute harmless values that the
+  // user-bubble render ignores. Negligible overhead, keeps the
+  // component lint-clean.
   const [open, setOpen] = useState(false);
+
+  // Safety net: strip any markdown image / HTML img / placeholder
+  // URLs / standalone hr lines the LLM might emit despite the
+  // system-prompt rules. Server-side prompt is the primary defense;
+  // this is the second line so the user never sees a fake
+  // !\[](https://...) inline. User bubbles run through it too but
+  // their content rendering bypasses `displayContent`, so this is a
+  // no-op for the user branch.
+  const displayContent = sanitizeAssistantText(message.content);
+
+  // ── Smooth typewriter reveal ────────────────────────────────────────
+  //
+  // The chat server streams tokens, but tokens arrive in irregular
+  // chunks — Claude often sends 3-12 characters per `delta`, and
+  // network bursts can deliver 50+ characters in a single event after
+  // a stall. Rendering raw deltas felt:
+  //
+  //   - jumpy when a big chunk landed all at once
+  //   - "stuck" when the network paused, even though the model was
+  //     still generating
+  //
+  // Fix: drive the visible text from `revealed` instead of
+  // `displayContent`. `displayContent` is the truth (what the model
+  // has sent so far); `revealed` lags behind by one timer tick. We
+  // advance `revealed` by 1 character per ~22ms — comfortable reading
+  // speed (~45 chars/sec) — and adapt the speed when the model is
+  // way ahead so we don't fall hopelessly behind on long replies.
+  //
+  // For non-pending messages (history, scheduled greetings, etc.) we
+  // initialise `revealed` to the full content so they appear instantly
+  // with no animation. Only fresh streaming bubbles animate.
+  const [revealed, setRevealed] = useState(() =>
+    message.pending ? '' : displayContent,
+  );
+
+  useEffect(() => {
+    // Non-pending → snap to full content. Also fires on the final
+    // 'done' event so any unrevealed tail gets flushed instantly when
+    // the stream ends (no awkward "still typing after server said
+    // done" hang).
+    if (!message.pending) {
+      if (revealed !== displayContent) setRevealed(displayContent);
+      return;
+    }
+
+    // Content shrank (regenerate / sanitiser kicked in) — re-anchor.
+    if (revealed.length > displayContent.length) {
+      setRevealed(displayContent);
+      return;
+    }
+
+    // Already caught up — wait for the next token.
+    if (revealed.length === displayContent.length) return;
+
+    // Adaptive reveal rate. Buffer = chars the model has produced but
+    // we haven't shown yet. Bigger buffer → faster reveal so a network
+    // burst doesn't leave us minutes behind. Small buffer → steady
+    // readable pace.
+    const buffer = displayContent.length - revealed.length;
+    const stepMs =
+      buffer > 200 ? 4 : buffer > 80 ? 8 : buffer > 30 ? 14 : 22;
+
+    const timer = window.setTimeout(() => {
+      // Reveal one char per tick. For big buffers the smaller stepMs
+      // already accelerates throughput; we still go one-by-one to keep
+      // the animation visually smooth (a 5-char jump would read as a
+      // chunk again).
+      setRevealed(displayContent.slice(0, revealed.length + 1));
+    }, stepMs);
+    return () => window.clearTimeout(timer);
+  }, [revealed, displayContent, message.pending]);
+
+  // ── Render branches ─────────────────────────────────────────────────
+  // User messages: no typewriter, no menu — they sent it themselves.
+  // The assistant branch below uses the hooks declared above.
   if (message.role === 'user') {
     return (
       <div
@@ -1751,24 +1868,26 @@ function ChatBubble({
       </div>
     );
   }
+
   const streaming = message.pending && !!message.content;
   const ttsFilename = `${message.id.slice(0, 8)}.mp3`;
-  // Safety net: strip any markdown image / HTML img / placeholder
-  // URLs / standalone hr lines the LLM might emit despite the
-  // system-prompt rules. Server-side prompt is the primary defense;
-  // this is the second line so the user never sees a fake
-  // !\[](https://...) inline.
-  const displayContent = sanitizeAssistantText(message.content);
+
   return (
     <div
       className="max-w-[80%] cursor-pointer rounded-2xl bg-white px-4 py-2.5 font-sans text-[16px] leading-[1.65] text-brand-ink shadow-xs"
       onClick={() => message.content && setOpen((v) => !v)}
     >
-      {message.pending && !message.content ? (
+      {message.pending && !revealed ? (
+        // Keep the typing dots visible until the FIRST character has
+        // actually been revealed, not just until the server's first
+        // token arrives. Otherwise there's a ~22ms blank frame
+        // between the dots disappearing and the first letter
+        // appearing — visible as a tiny flicker. With this guard the
+        // dots stay on screen all the way up to the first '안'.
         <TypingDots accent={accentColor} />
       ) : (
         <>
-          {displayContent || ' '}
+          {revealed || ' '}
           {streaming ? (
             <span
               aria-hidden
