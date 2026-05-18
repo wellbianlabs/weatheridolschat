@@ -1675,12 +1675,28 @@ export default function ChatClient({ character }: { character: Character }) {
               ← Home
             </Link>
             <div className="flex items-center gap-3">
-              <div
-                className="flex h-8 w-8 items-center justify-center rounded-full font-display text-sm text-white"
-                style={{ background: character.accentColor }}
-              >
-                {character.displayNameEn.charAt(0)}
-              </div>
+              {/* Header avatar (top of chat page). Was a letter
+                  monogram on accent-colored background; now the
+                  actual roster portrait so the user can confirm
+                  visually at a glance who they're talking to. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={character.rosterImageUrl}
+                alt={character.displayName}
+                width={32}
+                height={32}
+                className="h-8 w-8 shrink-0 rounded-full object-cover ring-2"
+                style={{
+                  // The accent ring doubles as the previous solid-
+                  // color background — same character recognition
+                  // signal, with the actual face inside the disc.
+                  // ringColor via inline style because Tailwind's
+                  // ring utilities can't bind to a runtime value.
+                  boxShadow: `0 0 0 2px ${character.accentColor}`,
+                }}
+                loading="eager"
+                decoding="async"
+              />
               <span
                 className="font-display text-2xl font-medium tracking-tight"
                 style={{ color: character.accentColor }}
@@ -1723,16 +1739,32 @@ export default function ChatClient({ character }: { character: Character }) {
                       className="mt-4 mb-1 flex items-center gap-2"
                       style={{ paddingLeft: '2px' }}
                     >
-                      <span
-                        className="flex h-6 w-6 items-center justify-center rounded-full text-[12px]"
-                        style={{
-                          background: character.accentColor + '26',
-                          color: character.accentColor,
-                        }}
-                        aria-hidden
-                      >
-                        {character.displayName.slice(0, 1)}
-                      </span>
+                      {/* Real roster portrait instead of the previous
+                          letter placeholder. `/roster/{id}.webp` is
+                          already shipped + compressed for web display
+                          (same asset the characters list page uses)
+                          — we just render it at 28px circle here.
+                          - Accent-tinted ring keeps it visually
+                            grouped with the bubble's accent color
+                            for that character.
+                          - referrerPolicy='no-referrer' so the
+                            request stays anonymous on any CDN
+                            re-host.
+                          - eslint-disable for next/image because
+                            these assets are small static files and
+                            the optimisation pipeline adds no value
+                            at 28px. */}
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={character.rosterImageUrl}
+                        alt={character.displayName}
+                        width={28}
+                        height={28}
+                        className="h-7 w-7 shrink-0 rounded-full object-cover ring-2 ring-white"
+                        style={{ boxShadow: `0 0 0 2px ${character.accentColor}40` }}
+                        loading="lazy"
+                        decoding="async"
+                      />
                       <span className="font-sans text-[13px] font-medium text-brand-ink">
                         {character.displayName}
                       </span>
