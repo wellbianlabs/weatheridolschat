@@ -1675,21 +1675,22 @@ export default function ChatClient({ character }: { character: Character }) {
               ← Home
             </Link>
             <div className="flex items-center gap-3">
-              {/* Header avatar (top of chat page). Was a letter
-                  monogram on accent-colored background; now the
-                  actual roster portrait so the user can confirm
-                  visually at a glance who they're talking to. */}
+              {/* Header avatar (top of chat page). Uses
+                  referenceImageUrl — the close-up face shot that the
+                  selfie generator also takes as its visual anchor —
+                  rather than rosterImageUrl which is a full-body
+                  card. At 32px circle the face is what matters; the
+                  body of the roster image would just show as cropped
+                  noise. Same accent-colored ring as the previous
+                  monogram so the character-recognition signal stays. */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={character.rosterImageUrl}
+                src={character.referenceImageUrl}
                 alt={character.displayName}
                 width={32}
                 height={32}
                 className="h-8 w-8 shrink-0 rounded-full object-cover ring-2"
                 style={{
-                  // The accent ring doubles as the previous solid-
-                  // color background — same character recognition
-                  // signal, with the actual face inside the disc.
                   // ringColor via inline style because Tailwind's
                   // ring utilities can't bind to a runtime value.
                   boxShadow: `0 0 0 2px ${character.accentColor}`,
@@ -1739,24 +1740,20 @@ export default function ChatClient({ character }: { character: Character }) {
                       className="mt-4 mb-1 flex items-center gap-2"
                       style={{ paddingLeft: '2px' }}
                     >
-                      {/* Real roster portrait instead of the previous
-                          letter placeholder. `/roster/{id}.webp` is
-                          already shipped + compressed for web display
-                          (same asset the characters list page uses)
-                          — we just render it at 28px circle here.
-                          - Accent-tinted ring keeps it visually
-                            grouped with the bubble's accent color
-                            for that character.
-                          - referrerPolicy='no-referrer' so the
-                            request stays anonymous on any CDN
-                            re-host.
-                          - eslint-disable for next/image because
-                            these assets are small static files and
-                            the optimisation pipeline adds no value
-                            at 28px. */}
+                      {/* Sender header avatar — same close-up face
+                          source as the page header above. Smaller
+                          (28px) and softer accent treatment because
+                          this repeats above every new assistant
+                          run; a bold ring would be visually noisy.
+                          - White inner ring (2px) keeps the face
+                            visually distinct from the paper bg
+                          - Accent-tinted glow halo via boxShadow
+                            says "this is the same character whose
+                            color the bubble carries" without
+                            shouting */}
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
-                        src={character.rosterImageUrl}
+                        src={character.referenceImageUrl}
                         alt={character.displayName}
                         width={28}
                         height={28}
