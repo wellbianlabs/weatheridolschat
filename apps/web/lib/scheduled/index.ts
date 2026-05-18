@@ -20,65 +20,130 @@ export interface ActivePremiumUser {
 }
 
 /**
- * Enumerate every user currently entitled to scheduled greetings:
+ * Comma-separated admin allowlist from env. Matches the convention
+ * used by lib/supabase/identity.ts so the two sources of truth stay
+ * aligned. Lower-cased once so the comparison can stay case-
+ * insensitive without re-normalising per user.
+ */
+function getAdminEmails(): string[] {
+  const fromEnv = process.env.ADMIN_EMAILS;
+  const list = fromEnv
+    ? fromEnv.split(',').map((s) => s.trim()).filter(Boolean)
+    : [];
+  if (!list.length) list.push('admin@wellbianlabs.io');
+  return list.map((s) => s.toLowerCase());
+}
+
+/**
+ * Enumerate every user currently entitled to scheduled greetings.
  *
- *   - has a `subscriptions` row whose `status` is 'active' or 'canceled'
- *     (canceled but still within the paid period — same rule as
- *     `getActiveSubscription`)
- *   - AND that row's `current_period_end` is in the future
+ * Two sources merged (de-duped by user_id):
  *
- * Joined with `profiles` so the caller already has the nickname and
- * default location in hand for the weather lookup. Free-tier users
- * are silently absent from the result.
+ *   1. Active subscribers — has a `subscriptions` row whose `status`
+ *      is 'active' or 'canceled' (canceled but still within the
+ *      paid period — same rule as `getActiveSubscription`), AND
+ *      `current_period_end` in the future.
+ *
+ *   2. Admin accounts — every auth.users row whose email matches
+ *      the ADMIN_EMAILS env allowlist (default
+ *      `admin@wellbianlabs.io`). This is what makes the feature
+ *      testable in production without the operator having to fake-
+ *      purchase a subscription on their own account. Admins get
+ *      the same scheduled-greeting experience as a paying user.
+ *
+ * Joined with `profiles` so callers have nickname + default
+ * location in hand for the weather lookup.
  */
 export async function listActivePremiumUsers(): Promise<ActivePremiumUser[]> {
   const svc = getServiceSupabase();
   if (!svc) return [];
 
+  // ── 1. Premium subscribers ─────────────────────────────────────
   const nowIso = new Date().toISOString();
-  const { data, error } = await svc
+  const { data: subsData, error: subsErr } = await svc
     .from('subscriptions')
     .select('user_id, profiles!inner(nickname, primary_lat, primary_lng, primary_label)')
     .in('status', ['active', 'canceled'])
     .gte('current_period_end', nowIso);
 
-  if (error) {
-    console.error(`[scheduled] listActivePremiumUsers fail: ${error.message}`);
-    return [];
+  if (subsErr) {
+    console.error(`[scheduled] listActivePremiumUsers subs fail: ${subsErr.message}`);
   }
 
-  // Supabase returns the joined `profiles` as an object when the relation
-  // is unique (which it is — profiles.id = subscriptions.user_id), but
-  // generic typing collapses to `any | any[]`. Normalise here.
-  type Row = {
-    user_id: string;
-    profiles:
-      | {
-          nickname: string;
-          primary_lat: number | null;
-          primary_lng: number | null;
-          primary_label: string | null;
-        }
-      | Array<{
-          nickname: string;
-          primary_lat: number | null;
-          primary_lng: number | null;
-          primary_label: string | null;
-        }>;
+  type ProfileShape = {
+    nickname: string;
+    primary_lat: number | null;
+    primary_lng: number | null;
+    primary_label: string | null;
   };
-  return ((data as Row[]) ?? []).flatMap((r) => {
+  type SubRow = {
+    user_id: string;
+    profiles: ProfileShape | ProfileShape[];
+  };
+
+  const out = new Map<string, ActivePremiumUser>();
+  for (const r of (subsData as SubRow[]) ?? []) {
     const p = Array.isArray(r.profiles) ? r.profiles[0] : r.profiles;
-    if (!p) return [];
-    return [
-      {
-        userId: r.user_id,
-        nickname: p.nickname,
-        primaryLat: p.primary_lat,
-        primaryLng: p.primary_lng,
-        primaryLabel: p.primary_label,
-      },
-    ];
-  });
+    if (!p) continue;
+    out.set(r.user_id, {
+      userId: r.user_id,
+      nickname: p.nickname,
+      primaryLat: p.primary_lat,
+      primaryLng: p.primary_lng,
+      primaryLabel: p.primary_label,
+    });
+  }
+
+  // ── 2. Admin accounts (auto-include) ───────────────────────────
+  // Pulls every admin from auth.users (service-role can read it),
+  // then joins to profiles for the nickname/location bundle.
+  // listUsers() is admin-paginated; the first 100 covers our
+  // small ADMIN_EMAILS list comfortably.
+  const adminEmails = getAdminEmails();
+  if (adminEmails.length > 0) {
+    try {
+      const { data: authPage, error: authErr } = await svc.auth.admin.listUsers({
+        page: 1,
+        perPage: 100,
+      });
+      if (authErr) {
+        console.warn(`[scheduled] admin lookup auth fail: ${authErr.message}`);
+      } else {
+        const adminUserIds = (authPage?.users ?? [])
+          .filter((u) => u.email && adminEmails.includes(u.email.toLowerCase()))
+          .map((u) => u.id);
+
+        if (adminUserIds.length > 0) {
+          const { data: profRows, error: profErr } = await svc
+            .from('profiles')
+            .select('id, nickname, primary_lat, primary_lng, primary_label')
+            .in('id', adminUserIds);
+          if (profErr) {
+            console.warn(`[scheduled] admin profile lookup fail: ${profErr.message}`);
+          } else {
+            for (const p of (profRows as ({ id: string } & ProfileShape)[]) ?? []) {
+              // Subscriber entry wins if already present — admin
+              // who's also a paying customer doesn't get inserted
+              // twice. The de-dup happens naturally via the Map key.
+              if (!out.has(p.id)) {
+                out.set(p.id, {
+                  userId: p.id,
+                  nickname: p.nickname,
+                  primaryLat: p.primary_lat,
+                  primaryLng: p.primary_lng,
+                  primaryLabel: p.primary_label,
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[scheduled] admin lookup threw: ${(err as Error).message}`);
+    }
+  }
+
+  return Array.from(out.values());
 }
 
 /**
