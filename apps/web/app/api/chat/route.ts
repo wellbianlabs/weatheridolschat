@@ -9,6 +9,7 @@ import { buildKstContext, formatKstLocalTime } from '@wi/core/time';
 import {
   getOrCreateSession,
   getSessionMemory,
+  saveAttachment,
   saveTurns,
   type PersistedTurn,
 } from '@/lib/messages';
@@ -481,6 +482,18 @@ export async function POST(req: Request): Promise<Response> {
           const product = pickProductForCharacter(character.id);
           if (product) {
             send({ type: 'attachment', payload: { kind: 'product', ...product } });
+            // Persist the product card as its own messages row so it
+            // syncs across devices. Fire-and-forget — the visual card
+            // is already on the client; a DB failure here just means
+            // the card disappears on next mount (acceptable).
+            if (sessionId) {
+              void saveAttachment({
+                sessionId,
+                role: 'assistant',
+                metadata: { kind: 'product', ...product },
+                createdAt: Date.now(),
+              });
+            }
           }
         }
 

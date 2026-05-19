@@ -1,9 +1,6 @@
 import { NextResponse } from 'next/server';
 
-import {
-  getSessionMemory,
-  listRecentTextMessages,
-} from '@/lib/messages';
+import { getSessionMemory, listRecentMessages } from '@/lib/messages';
 import { resolveUser } from '@/lib/supabase/identity';
 
 export const runtime = 'nodejs';
@@ -50,8 +47,11 @@ export async function GET(req: Request): Promise<Response> {
     return NextResponse.json({ messages: [], memorySummary: null });
   }
 
+  // Phase B-2 expansion: history now includes image/song/product
+  // rows along with text. The chat client hydrates each by switching
+  // on `kind` and rendering the appropriate bubble component.
   const [messages, memorySummary] = await Promise.all([
-    listRecentTextMessages(caller.id, characterId, 50),
+    listRecentMessages(caller.id, characterId, 50),
     getSessionMemory(caller.id, characterId),
   ]);
 

@@ -313,6 +313,51 @@ function saveHistory(characterId: string, messages: UIMessage[]) {
 }
 
 /**
+ * Persist a finished weather song to the messages table.
+ *
+ * Phase B-2 attachment sync — same fire-and-forget pattern as the
+ * selfie image persistence. Called from two spots:
+ *
+ *   - Mock-adapter kickoff returns status='done' synchronously
+ *   - Suno polling loop observes status flipping to 'done'
+ *
+ * Failures are silent. The song card stays on this device via React
+ * state regardless; the DB write is only there so other devices see
+ * the same card on next hydrate.
+ */
+async function persistSongAttachment(
+  characterId: string,
+  song: {
+    audioUrl: string;
+    title?: string;
+    lyrics?: string;
+    durationMs?: number;
+    taskId?: string;
+  },
+): Promise<void> {
+  try {
+    await fetch('/api/chat/attachment', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        characterId,
+        metadata: {
+          kind: 'song',
+          audioUrl: song.audioUrl,
+          title: song.title,
+          lyrics: song.lyrics,
+          durationMs: song.durationMs,
+          taskId: song.taskId,
+        },
+      }),
+    });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
  * Fire-and-forget rolling memory updater.
  *
  * Goal: keep a one-paragraph third-person "what the character knows
@@ -678,7 +723,34 @@ export default function ChatClient({ character }: { character: Character }) {
           messages: Array<{
             id: string;
             role: 'user' | 'assistant';
+            kind: 'text' | 'image' | 'song' | 'product';
             content: string;
+            metadata:
+              | {
+                  kind: 'image';
+                  imageUrl: string;
+                  width?: number;
+                  height?: number;
+                }
+              | {
+                  kind: 'song';
+                  audioUrl: string;
+                  title?: string;
+                  lyrics?: string;
+                  durationMs?: number;
+                  taskId?: string;
+                }
+              | {
+                  kind: 'product';
+                  campaignId: string;
+                  productId: string;
+                  title: string;
+                  price: number;
+                  currency: string;
+                  imageUrl: string;
+                  ctaUrl: string;
+                }
+              | null;
             createdAt: number;
           }>;
           memorySummary: string | null;
@@ -686,17 +758,69 @@ export default function ChatClient({ character }: { character: Character }) {
         if (!alive) return;
 
         if (data.messages.length > 0) {
-          // Server wins. Convert to UIMessage shape — all rows are
-          // text since /api/chat/history filters to modality=text.
-          // (Phase B-2: image/song attachments will join here once
-          // they're persisted too.)
-          const fromDb: UIMessage[] = data.messages.map((m) => ({
-            id: m.id,
-            role: m.role,
-            kind: 'text',
-            content: m.content,
-            createdAt: m.createdAt,
-          }));
+          // Server wins. Convert each DB row to its renderer-ready
+          // UIMessage shape, dispatching on `kind`. Phase B-2: image
+          // (셀카), song (날씨송), and product cards all hydrate
+          // along with text now.
+          const fromDb: UIMessage[] = data.messages.map((m): UIMessage => {
+            if (m.kind === 'image' && m.metadata?.kind === 'image') {
+              return {
+                id: m.id,
+                role: m.role,
+                kind: 'image',
+                imageUrl: m.metadata.imageUrl,
+                createdAt: m.createdAt,
+              };
+            }
+            if (m.kind === 'song' && m.metadata?.kind === 'song') {
+              const md = m.metadata;
+              return {
+                id: m.id,
+                role: m.role,
+                kind: 'music',
+                createdAt: m.createdAt,
+                music: {
+                  // taskId is for live polling; for restored history
+                  // we mark status=done with the audio URL on hand.
+                  // durationMs lives in DB metadata for future use
+                  // but MusicTrack doesn't expose it on the renderer
+                  // yet, so we drop it here.
+                  taskId: md.taskId ?? '',
+                  status: 'done',
+                  audioUrl: md.audioUrl,
+                  title: md.title,
+                  lyrics: md.lyrics,
+                },
+              };
+            }
+            if (m.kind === 'product' && m.metadata?.kind === 'product') {
+              const md = m.metadata;
+              return {
+                id: m.id,
+                role: m.role,
+                kind: 'product',
+                createdAt: m.createdAt,
+                product: {
+                  campaignId: md.campaignId,
+                  productId: md.productId,
+                  title: md.title,
+                  price: md.price,
+                  currency: md.currency,
+                  imageUrl: md.imageUrl,
+                  ctaUrl: md.ctaUrl,
+                },
+              };
+            }
+            // Default = text. The metadata column is null for plain
+            // text rows.
+            return {
+              id: m.id,
+              role: m.role,
+              kind: 'text',
+              content: m.content,
+              createdAt: m.createdAt,
+            };
+          });
           setMessages(fromDb);
         } else {
           // Server is empty. If THIS device has localStorage history,
@@ -1312,6 +1436,14 @@ export default function ChatClient({ character }: { character: Character }) {
       kickoff.status !== 'done',
     );
     if (kickoff.status === 'done' && kickoff.audioUrl) {
+      // Mock-adapter path: full song ready in the kickoff response.
+      // Persist immediately so the bubble survives device switches.
+      void persistSongAttachment(character.id, {
+        audioUrl: kickoff.audioUrl,
+        title: kickoff.title,
+        lyrics: kickoff.lyrics,
+        taskId: kickoff.taskId,
+      });
       delete songAbortersRef.current[songId];
       return;
     }
@@ -1362,6 +1494,17 @@ export default function ChatClient({ character }: { character: Character }) {
           d.status !== 'done' && d.status !== 'failed',
         );
         if (d.status === 'done' || d.status === 'failed') {
+          // Suno polling reached terminal state. On success, push
+          // the final audioUrl + metadata to the messages table so
+          // the card survives device switches.
+          if (d.status === 'done' && d.audioUrl) {
+            void persistSongAttachment(character.id, {
+              audioUrl: d.audioUrl,
+              title: d.title,
+              lyrics: d.lyrics,
+              taskId,
+            });
+          }
           delete songAbortersRef.current[songId];
           return;
         }
@@ -1706,6 +1849,28 @@ export default function ChatClient({ character }: { character: Character }) {
                 m.id === imageId ? { ...m, imageUrl: data.imageUrl, pending: false } : m,
               ),
             );
+            // Persist the selfie to the messages table so it shows
+            // up on the user's other devices via the next
+            // /api/chat/history hydrate. Fire-and-forget; failure
+            // here just means this particular image won't survive
+            // a device switch (acceptable — the rest of the
+            // conversation still does).
+            if (data.imageUrl) {
+              void fetch('/api/chat/attachment', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({
+                  characterId: character.id,
+                  metadata: {
+                    kind: 'image',
+                    imageUrl: data.imageUrl,
+                  },
+                }),
+              }).catch(() => {
+                /* best-effort */
+              });
+            }
           }
         } catch (err) {
           setMessages((prev) =>

@@ -23,10 +23,49 @@ export interface PersistedTurn {
   model?: string;
 }
 
+/**
+ * Per-modality attachment metadata. Mirrors the discriminated union
+ * in @wi/core/chat MessageMetadata so the wire shape between
+ * `/api/chat/history` and the chat client is identical to what the
+ * client already renders today.
+ */
+export type AttachmentMetadata =
+  | {
+      kind: 'image';
+      imageUrl: string;
+      width?: number;
+      height?: number;
+    }
+  | {
+      kind: 'song';
+      audioUrl: string;
+      title?: string;
+      lyrics?: string;
+      durationMs?: number;
+      taskId?: string;
+    }
+  | {
+      kind: 'product';
+      campaignId: string;
+      productId: string;
+      title: string;
+      price: number;
+      currency: string;
+      imageUrl: string;
+      ctaUrl: string;
+    };
+
 export interface ChatHistoryRecord {
   id: string;
   role: 'user' | 'assistant';
+  /** Discriminator the chat client uses to pick which UI to render. */
+  kind: 'text' | 'image' | 'song' | 'product';
+  /** Plain text (for kind='text') or a short caption / lyric snippet
+   *  (other kinds). May be empty for purely visual rows like image. */
   content: string;
+  /** Metadata object — typed against AttachmentMetadata when
+   *  kind !== 'text'. null for plain text rows. */
+  metadata: AttachmentMetadata | null;
   /** Epoch ms — converted from the DB's timestamptz column. */
   createdAt: number;
 }
@@ -97,20 +136,20 @@ export async function saveTurns(
 }
 
 /**
- * Most recent text turns for one user × one character — oldest first
- * (display order). Caps at `limit` rows from the DB (queries
- * newest-first to get the last N, then reverses for UI).
+ * Most recent turns of ANY modality (text + image + song + product)
+ * for one user × one character. Oldest-first (display order).
+ *
+ * Phase B-2 expanded this from text-only to all kinds so attachments
+ * (selfies, weather songs, product cards) sync across devices the
+ * same way text turns do. Non-text rows carry their renderer data
+ * in the `metadata` jsonb column.
  *
  * Returns [] when:
  *   - service-role client isn't configured
  *   - the user has no session with this character yet
  *   - the session exists but has no messages
- *
- * Non-text modalities (image/song/product) are skipped here; those
- * still live in client-side localStorage. Phase B-2 will persist
- * them with their metadata as well.
  */
-export async function listRecentTextMessages(
+export async function listRecentMessages(
   userId: string,
   characterId: string,
   limit = 50,
@@ -128,23 +167,75 @@ export async function listRecentTextMessages(
 
   const { data, error } = await svc
     .from('messages')
-    .select('id, role, content, created_at, modality')
+    .select('id, role, content, modality, metadata, created_at')
     .eq('session_id', sessionData.id as string)
-    .eq('modality', 'text')
+    .in('modality', ['text', 'image', 'song', 'product'])
     .order('created_at', { ascending: false })
     .limit(limit);
   if (error || !data) return [];
 
   return data
     .filter((r) => r.role === 'user' || r.role === 'assistant')
-    .filter((r) => typeof r.content === 'string' && (r.content as string).length > 0)
     .reverse()
-    .map((r) => ({
-      id: r.id as string,
-      role: r.role as 'user' | 'assistant',
-      content: (r.content as string) ?? '',
-      createdAt: new Date(r.created_at as string).getTime(),
-    }));
+    .map((r): ChatHistoryRecord => {
+      const modality = r.modality as 'text' | 'image' | 'song' | 'product';
+      const metadata = r.metadata as AttachmentMetadata | null;
+      // Backwards-compat name kept: 'text' rows still flow through
+      // this list. The chat client switches on `kind` to render.
+      return {
+        id: r.id as string,
+        role: r.role as 'user' | 'assistant',
+        kind: modality,
+        content: typeof r.content === 'string' ? (r.content as string) : '',
+        metadata: modality === 'text' ? null : (metadata ?? null),
+        createdAt: new Date(r.created_at as string).getTime(),
+      };
+    });
+}
+
+/**
+ * Backwards-compatibility alias for callers that imported the old
+ * text-only function name. New code should use `listRecentMessages`.
+ */
+export const listRecentTextMessages = listRecentMessages;
+
+/**
+ * Persist a single non-text turn — selfie, weather song, or
+ * product card. Used by the attachment confirmation endpoint
+ * after the client-side generator pipeline produces a final URL.
+ *
+ * Why separate from saveTurns: attachments need their renderer
+ * data (image URL, audio URL, product fields) stashed in the
+ * `metadata` jsonb. text turns don't have metadata at all.
+ *
+ * Returns true on success; logs + returns false on DB error.
+ */
+export async function saveAttachment(args: {
+  sessionId: string;
+  role: 'user' | 'assistant';
+  metadata: AttachmentMetadata;
+  /** Optional short text — caption, lyrics snippet, etc. Not the
+   *  primary content for these kinds; the renderer reads metadata. */
+  content?: string;
+  createdAt: number;
+  model?: string;
+}): Promise<boolean> {
+  const svc = getServiceSupabase();
+  if (!svc) return false;
+  const { error } = await svc.from('messages').insert({
+    session_id: args.sessionId,
+    role: args.role,
+    modality: args.metadata.kind,
+    content: args.content ?? null,
+    metadata: args.metadata,
+    model: args.model ?? null,
+    created_at: new Date(args.createdAt).toISOString(),
+  });
+  if (error) {
+    console.error(`[messages] saveAttachment fail: ${error.message}`);
+    return false;
+  }
+  return true;
 }
 
 /**
