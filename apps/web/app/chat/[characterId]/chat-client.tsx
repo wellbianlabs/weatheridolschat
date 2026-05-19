@@ -631,10 +631,120 @@ export default function ChatClient({ character }: { character: Character }) {
 
   useEffect(() => {
     setNickname(localStorage.getItem('wi.nickname') ?? '친구');
+    // localStorage prior is the WARM cache — paint instantly while
+    // we kick off the server fetch below. The DB fetch (next effect)
+    // will replace state with authoritative data once auth resolves
+    // and the round-trip completes.
     const prior = loadHistory(character.id);
     if (prior && prior.length > 0) setMessages(prior);
     setUsage(getTodayCount());
   }, [character.id]);
+
+  // ── DB-backed history sync ────────────────────────────────────────
+  //
+  // The cross-device problem ("PC마다 대화 내역이 다르다") was caused
+  // by chat history living ONLY in per-device localStorage. This
+  // effect makes the server the source of truth:
+  //
+  //   1. Wait until `account` resolves (auth state loaded). null
+  //      means "still loading"; { email: null } means anon.
+  //   2. Anon: do nothing — localStorage stays as it was, since
+  //      there's no server-side row to merge with.
+  //   3. Signed in: GET /api/chat/history for this character.
+  //      - If server returns messages → those are truth. Replace
+  //        local React state with them. The localStorage cache
+  //        gets overwritten on the next saveHistory tick.
+  //      - If server returns [] but localStorage has prior turns →
+  //        first sync on a new device path. POST those turns to
+  //        /api/chat/history/migrate so future visits load from
+  //        the DB.
+  //      - If both server and localStorage are empty → welcome
+  //        bubble path. Nothing to do.
+  //   4. Always sync server's memorySummary into localStorage so
+  //      the next /api/chat call's `memorySummary` field is
+  //      populated even when the user opens chat on a fresh device.
+  useEffect(() => {
+    if (account === null) return; // auth still loading
+    if (!account.email) return; // anon — no DB persistence
+    let alive = true;
+    void (async () => {
+      try {
+        const res = await fetch(
+          `/api/chat/history?characterId=${encodeURIComponent(character.id)}`,
+          { credentials: 'include' },
+        );
+        if (!res.ok || !alive) return;
+        const data = (await res.json()) as {
+          messages: Array<{
+            id: string;
+            role: 'user' | 'assistant';
+            content: string;
+            createdAt: number;
+          }>;
+          memorySummary: string | null;
+        };
+        if (!alive) return;
+
+        if (data.messages.length > 0) {
+          // Server wins. Convert to UIMessage shape — all rows are
+          // text since /api/chat/history filters to modality=text.
+          // (Phase B-2: image/song attachments will join here once
+          // they're persisted too.)
+          const fromDb: UIMessage[] = data.messages.map((m) => ({
+            id: m.id,
+            role: m.role,
+            kind: 'text',
+            content: m.content,
+            createdAt: m.createdAt,
+          }));
+          setMessages(fromDb);
+        } else {
+          // Server is empty. If THIS device has localStorage history,
+          // push it once — that captures the user's conversation on
+          // whichever device they previously used before this
+          // migration shipped. Idempotency lives server-side (the
+          // migrate endpoint refuses if any row already exists).
+          const localPrior = loadHistory(character.id);
+          if (localPrior && localPrior.length > 0) {
+            const turns = localPrior
+              .filter(
+                (m) =>
+                  m.kind === 'text' &&
+                  m.content &&
+                  m.content.trim().length > 0 &&
+                  (m.role === 'user' || m.role === 'assistant'),
+              )
+              .map((m) => ({
+                role: m.role,
+                content: m.content!,
+                createdAt: m.createdAt,
+              }));
+            if (turns.length > 0) {
+              void fetch('/api/chat/history/migrate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'include',
+                body: JSON.stringify({ characterId: character.id, turns }),
+              });
+            }
+          }
+        }
+
+        if (data.memorySummary && data.memorySummary.trim().length > 0) {
+          try {
+            localStorage.setItem(`wi.memory.${character.id}`, data.memorySummary);
+          } catch {
+            /* localStorage full — chat still works without warm cache */
+          }
+        }
+      } catch {
+        /* network error — localStorage cache stays as-is */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [character.id, account]);
 
   // Load + subscribe to Supabase auth state. The admin email is
   // hard-coded in lib/supabase/identity.ts; the client UI keeps a

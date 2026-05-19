@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 
 import { CHARACTERS } from '@wi/core/characters';
 
+import { updateSessionMemory } from '@/lib/messages';
 import { resolveUser } from '@/lib/supabase/identity';
 
 export const runtime = 'nodejs';
@@ -159,6 +160,13 @@ export async function POST(req: Request): Promise<Response> {
     console.info(
       `[summarize] OK user=${caller.id.slice(0, 8)}… char=${character.id} in=${messages.length}msgs out=${summary.length}chars`,
     );
+    // Persist server-side so a different device can pick up the
+    // summary on next /api/chat/history fetch — was localStorage-only
+    // before, which defeated the cross-device sync this whole
+    // architecture pass is fixing. Fire-and-forget: the response
+    // ships before the DB write completes, but the next chat turn
+    // is what reads it back anyway.
+    void updateSessionMemory(caller.id, character.id, summary);
     return NextResponse.json({ summary });
   } catch (err) {
     console.error(`[summarize] threw: ${(err as Error).message}`);

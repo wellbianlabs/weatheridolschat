@@ -6,10 +6,15 @@ import { pickProductForCharacter } from '@wi/core/monetization';
 import { runInputSafeguard } from '@wi/core/safeguards';
 import { buildKstContext, formatKstLocalTime } from '@wi/core/time';
 
+import {
+  getOrCreateSession,
+  getSessionMemory,
+  saveTurns,
+  type PersistedTurn,
+} from '@/lib/messages';
 import { getProfileLocation } from '@/lib/profile';
 import { consumeQuota, quotaHeaders, type QuotaResult } from '@/lib/quota';
 import { resolveUser } from '@/lib/supabase/identity';
-import { getServiceSupabase } from '@/lib/supabase/service';
 import { pickChatAdapter, pickFallbackAdapter, SYSTEM_PROMPTS } from '@wi/ai';
 import { getCurrentWeather } from '@wi/weather';
 
@@ -234,16 +239,44 @@ export async function POST(req: Request): Promise<Response> {
     );
   }
 
-  // Record this turn in the `sessions` table so we can answer
-  // "which character did this user chat with most recently" — used
-  // by the 4×/day scheduled-greeting cron in
-  // apps/web/app/api/cron/weather-greeting to pick a sender. Anon
-  // callers skip silently (no `caller.id` to attribute the row to).
-  // Fire-and-forget — the chat stream MUST NOT block on this.
-  if (caller) void recordSessionTouch(caller.id, character.id);
+  // Upsert the sessions row and capture its id NOW — we need it
+  // after the stream ends to persist the two turns. `await` adds
+  // one round-trip (~50ms) at the start of every chat call but the
+  // alternative (deferred lookup at stream end) doubles the
+  // round-trips since we'd still need to upsert + select. Anon
+  // callers skip this entirely; their conversation stays in
+  // localStorage as before.
+  const sessionId = caller
+    ? await getOrCreateSession(caller.id, character.id)
+    : null;
+
+  // Memory summary cascade: client-supplied (warm cache) wins,
+  // then server-stored (sessions.memory_summary) — so a user
+  // opening the app on a new device with no localStorage still
+  // gets long-term memory injected into their first prompt.
+  let memorySummary: string | undefined;
+  if (
+    typeof body.memorySummary === 'string' &&
+    body.memorySummary.trim().length > 0
+  ) {
+    memorySummary = body.memorySummary.slice(0, 4000);
+  } else if (caller) {
+    const fromDb = await getSessionMemory(caller.id, character.id);
+    if (fromDb && fromDb.trim().length > 0) {
+      memorySummary = fromDb.slice(0, 4000);
+    }
+  }
 
   const userMessageId = cryptoRandom();
   const assistantMessageId = cryptoRandom();
+
+  // Track the assistant's accumulated text during the stream so we
+  // can persist it after the loop ends. Stays empty for anon callers
+  // (we never write a Message row for them since there's no session
+  // to attach it to).
+  const userTurnCreatedAt = Date.now();
+  let assistantText = '';
+  let modelUsed = '';
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -300,11 +333,7 @@ export async function POST(req: Request): Promise<Response> {
           characterSystemPrompt: SYSTEM_PROMPTS[character.id],
           weather,
           history: adapterHistory,
-          memorySummary:
-            typeof body.memorySummary === 'string' &&
-            body.memorySummary.trim().length > 0
-              ? body.memorySummary.slice(0, 4000) // hard cap, just in case
-              : undefined,
+          memorySummary,
           // localTime is for the LLM's [Now Context] block. Always KST —
           // server runs in UTC on Vercel, but our characters live in 한국.
           user: {
@@ -347,6 +376,18 @@ export async function POST(req: Request): Promise<Response> {
         for await (const evt of adapter.stream(adapterInput)) {
           if (evt.type === 'token') {
             forwardedTokens = true;
+            // Accumulate for post-stream DB persistence. `delta` is
+            // typed as string on the token event variant.
+            if (typeof (evt as { delta?: string }).delta === 'string') {
+              assistantText += (evt as { delta: string }).delta;
+            }
+            send(evt);
+          } else if (evt.type === 'meta') {
+            // Capture model id for the assistant row's `model`
+            // column — useful for future analytics ("which model
+            // wrote which line"). Doesn't affect rendering.
+            const m = (evt as { model?: string }).model;
+            if (typeof m === 'string') modelUsed = m;
             send(evt);
           } else if (
             evt.type === 'error' &&
@@ -377,8 +418,21 @@ export async function POST(req: Request): Promise<Response> {
           // Same input, different adapter. The new adapter yields
           // its own `meta` event with its own model name — the chat
           // client just ignores that field, so this is invisible UX.
+          // Reset accumulators because the primary's partial output
+          // (if any) wasn't actually forwarded and shouldn't be
+          // persisted as part of the assistant turn.
+          assistantText = '';
+          modelUsed = '';
           for await (const evt of fallbackAdapter.stream(adapterInput)) {
-            if (evt.type === 'token') forwardedTokens = true;
+            if (evt.type === 'token') {
+              forwardedTokens = true;
+              if (typeof (evt as { delta?: string }).delta === 'string') {
+                assistantText += (evt as { delta: string }).delta;
+              }
+            } else if (evt.type === 'meta') {
+              const m = (evt as { model?: string }).model;
+              if (typeof m === 'string') modelUsed = m;
+            }
             send(evt);
           }
           console.info(
@@ -428,6 +482,39 @@ export async function POST(req: Request): Promise<Response> {
           if (product) {
             send({ type: 'attachment', payload: { kind: 'product', ...product } });
           }
+        }
+
+        // ── Persist the turn to the messages table ────────────────
+        // Only when we have a session id (caller signed in) AND the
+        // assistant actually produced output. Failures here are
+        // logged but don't fail the stream — the client already has
+        // the bubbles rendered.
+        if (sessionId && assistantText.trim().length > 0) {
+          const turns: PersistedTurn[] = [
+            {
+              role: 'user',
+              content: text,
+              createdAt: userTurnCreatedAt,
+            },
+            {
+              role: 'assistant',
+              content: assistantText,
+              // +1ms so the assistant lands AFTER the user turn when
+              // sorted by created_at on the next history fetch.
+              createdAt: userTurnCreatedAt + 1,
+              model: modelUsed || undefined,
+            },
+          ];
+          // Don't await — adds latency to controller.close() which
+          // delays the client's "done" event. Fire-and-forget is fine
+          // because the stream is already complete by this point.
+          void saveTurns(sessionId, turns).then((ok) => {
+            if (!ok) {
+              console.warn(
+                `[chat] saveTurns failed session=${sessionId.slice(0, 8)}… user=${caller?.id.slice(0, 8) ?? '-'}`,
+              );
+            }
+          });
         }
       } catch (err) {
         send({ type: 'error', code: 'internal_error', message: (err as Error).message });
@@ -505,37 +592,10 @@ function shouldAttachProductCard(text: string): boolean {
   return Math.random() < 0.3;
 }
 
-/**
- * Upsert a row into `sessions` keyed on (user_id, character_id) and
- * bump `last_message_at` to now. Used as a fire-and-forget side
- * effect of the chat route so the scheduled-greeting cron can find
- * each user's most recently-chatted character.
- *
- * No-op when the service-role key isn't configured. Errors are
- * swallowed (logged) because nothing about the chat response depends
- * on this succeeding — at worst the user just doesn't appear in the
- * cron's audience until their next message.
- */
-async function recordSessionTouch(userId: string, characterId: string): Promise<void> {
-  const svc = getServiceSupabase();
-  if (!svc) return;
-  try {
-    const nowIso = new Date().toISOString();
-    const { error } = await svc
-      .from('sessions')
-      .upsert(
-        { user_id: userId, character_id: characterId, last_message_at: nowIso },
-        { onConflict: 'user_id,character_id' },
-      );
-    if (error) {
-      console.warn(
-        `[chat] session touch fail user=${userId.slice(0, 8)}… char=${characterId}: ${error.message}`,
-      );
-    }
-  } catch (err) {
-    console.warn(`[chat] session touch threw: ${(err as Error).message}`);
-  }
-}
+// recordSessionTouch removed — getOrCreateSession() in @/lib/messages
+// does the same upsert AND returns the row id we need for downstream
+// `messages` inserts, in one round-trip. Single source of truth for
+// session creation.
 
 function streamSingleText(text: string): Response {
   const encoder = new TextEncoder();
