@@ -49,6 +49,10 @@ interface Body {
   metadata?: AttachmentMetadata;
   content?: string;
   createdAt?: number;
+  /** Caller-supplied row id — usually the same UUID the chat client
+   *  used for its local React state. Storing the same id makes the
+   *  realtime subscription's INSERT echo dedupe-able. */
+  id?: string;
 }
 
 export async function POST(req: Request): Promise<Response> {
@@ -114,6 +118,7 @@ export async function POST(req: Request): Promise<Response> {
   }
 
   const ok = await saveAttachment({
+    id: typeof body.id === 'string' && body.id ? body.id : undefined,
     sessionId,
     // All current attachments are assistant-emitted (the character
     // sends a selfie / song / product). If we ever add user-uploaded

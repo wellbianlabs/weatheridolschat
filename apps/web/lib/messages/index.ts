@@ -15,6 +15,14 @@ import { getServiceSupabase } from '../supabase/service';
  */
 
 export interface PersistedTurn {
+  /**
+   * Optional caller-supplied row id. Passing the same UUID the chat
+   * client used for its local React state means the realtime
+   * subscription's INSERT echo can be deduped against existing
+   * state by exact id-match rather than fuzzy heuristics. Omit to
+   * let the DB generate one (`gen_random_uuid()`).
+   */
+  id?: string;
   role: 'user' | 'assistant';
   content: string;
   /** Epoch ms — usually `Date.now()` from the route at send time. */
@@ -120,6 +128,10 @@ export async function saveTurns(
   if (!svc) return false;
   if (turns.length === 0) return true;
   const rows = turns.map((t) => ({
+    // Caller-supplied id wins; falls through to DB default
+    // (gen_random_uuid()) when omitted. Supabase JS accepts
+    // undefined fields and they get stripped before the SQL insert.
+    ...(t.id ? { id: t.id } : {}),
     session_id: sessionId,
     role: t.role,
     modality: 'text',
@@ -149,6 +161,27 @@ export async function saveTurns(
  *   - the user has no session with this character yet
  *   - the session exists but has no messages
  */
+/**
+ * Lookup the (user, character) session id without creating one.
+ * Returns null when no session exists yet. Different from
+ * getOrCreateSession() which always upserts; this one is for
+ * read-only paths like history fetch.
+ */
+export async function findSession(
+  userId: string,
+  characterId: string,
+): Promise<string | null> {
+  const svc = getServiceSupabase();
+  if (!svc) return null;
+  const { data } = await svc
+    .from('sessions')
+    .select('id')
+    .eq('user_id', userId)
+    .eq('character_id', characterId)
+    .maybeSingle();
+  return (data?.id as string | undefined) ?? null;
+}
+
 export async function listRecentMessages(
   userId: string,
   characterId: string,
@@ -211,6 +244,8 @@ export const listRecentTextMessages = listRecentMessages;
  * Returns true on success; logs + returns false on DB error.
  */
 export async function saveAttachment(args: {
+  /** Optional caller-supplied row id — see PersistedTurn.id rationale. */
+  id?: string;
   sessionId: string;
   role: 'user' | 'assistant';
   metadata: AttachmentMetadata;
@@ -223,6 +258,7 @@ export async function saveAttachment(args: {
   const svc = getServiceSupabase();
   if (!svc) return false;
   const { error } = await svc.from('messages').insert({
+    ...(args.id ? { id: args.id } : {}),
     session_id: args.sessionId,
     role: args.role,
     modality: args.metadata.kind,

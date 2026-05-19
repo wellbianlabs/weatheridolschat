@@ -313,6 +313,124 @@ function saveHistory(characterId: string, messages: UIMessage[]) {
 }
 
 /**
+ * Per-modality metadata as it comes off the wire (server response
+ * or Supabase Realtime payload). Mirrors AttachmentMetadata in
+ * lib/messages/index.ts. Duplicated here because the chat-client
+ * is purely a client-side file and we don't want to import a
+ * server-only module.
+ */
+type AttachmentMetadataRow =
+  | {
+      kind: 'image';
+      imageUrl: string;
+      width?: number;
+      height?: number;
+    }
+  | {
+      kind: 'song';
+      audioUrl: string;
+      title?: string;
+      lyrics?: string;
+      durationMs?: number;
+      taskId?: string;
+    }
+  | {
+      kind: 'product';
+      campaignId: string;
+      productId: string;
+      title: string;
+      price: number;
+      currency: string;
+      imageUrl: string;
+      ctaUrl: string;
+    };
+
+/**
+ * Convert a raw `messages` table row (from /api/chat/history or a
+ * Supabase Realtime INSERT event) into a UIMessage the chat
+ * renderer can consume. Returns null when modality + metadata don't
+ * line up — defensive guard against bad data.
+ *
+ * Shared between the hydrate effect (one big SELECT on mount) and
+ * the realtime subscription (one row at a time) so the mapping
+ * stays consistent. Extracted as a top-level helper rather than
+ * inlined in both call sites.
+ */
+function buildUiMessageFromRow(row: {
+  id: string;
+  role: 'user' | 'assistant';
+  modality: 'text' | 'image' | 'song' | 'product';
+  content: string | null;
+  metadata: AttachmentMetadataRow | null;
+  created_at?: string;
+  createdAt?: number;
+}): UIMessage | null {
+  // The hydrate path gives us `createdAt: number`; the realtime
+  // path gives us `created_at: string` (the raw DB column). Accept
+  // both.
+  const createdAt =
+    typeof row.createdAt === 'number'
+      ? row.createdAt
+      : row.created_at
+        ? new Date(row.created_at).getTime()
+        : Date.now();
+
+  if (row.modality === 'image' && row.metadata?.kind === 'image') {
+    return {
+      id: row.id,
+      role: row.role,
+      kind: 'image',
+      imageUrl: row.metadata.imageUrl,
+      createdAt,
+    };
+  }
+  if (row.modality === 'song' && row.metadata?.kind === 'song') {
+    const md = row.metadata;
+    return {
+      id: row.id,
+      role: row.role,
+      kind: 'music',
+      createdAt,
+      music: {
+        taskId: md.taskId ?? '',
+        status: 'done',
+        audioUrl: md.audioUrl,
+        title: md.title,
+        lyrics: md.lyrics,
+      },
+    };
+  }
+  if (row.modality === 'product' && row.metadata?.kind === 'product') {
+    const md = row.metadata;
+    return {
+      id: row.id,
+      role: row.role,
+      kind: 'product',
+      createdAt,
+      product: {
+        campaignId: md.campaignId,
+        productId: md.productId,
+        title: md.title,
+        price: md.price,
+        currency: md.currency,
+        imageUrl: md.imageUrl,
+        ctaUrl: md.ctaUrl,
+      },
+    };
+  }
+  if (row.modality === 'text') {
+    return {
+      id: row.id,
+      role: row.role,
+      kind: 'text',
+      content: row.content ?? '',
+      createdAt,
+    };
+  }
+  return null;
+}
+
+/**
  * Persist a finished weather song to the messages table.
  *
  * Phase B-2 attachment sync — same fire-and-forget pattern as the
@@ -328,6 +446,9 @@ function saveHistory(characterId: string, messages: UIMessage[]) {
 async function persistSongAttachment(
   characterId: string,
   song: {
+    /** Local React state id for this music bubble — passed to the
+     *  DB so realtime echoes dedupe by id-match. */
+    id: string;
     audioUrl: string;
     title?: string;
     lyrics?: string;
@@ -341,6 +462,7 @@ async function persistSongAttachment(
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({
+        id: song.id,
         characterId,
         metadata: {
           kind: 'song',
@@ -640,6 +762,11 @@ export default function ChatClient({ character }: { character: Character }) {
   const [account, setAccount] = useState<{ email: string | null; isAdmin: boolean } | null>(
     null,
   );
+  // Session id from /api/chat/history hydrate. Drives the Supabase
+  // Realtime subscription (Phase B-3). null = no session yet
+  // (user hasn't chatted with this character). The subscription
+  // effect waits for this to be set.
+  const [sessionId, setSessionId] = useState<string | null>(null);
   // Server-reported quota for the messages field. Pulled from
   // X-Quota-* headers on every /api/chat response — Phase 2 makes
   // these numbers authoritative (replaces the localStorage soft
@@ -683,6 +810,9 @@ export default function ChatClient({ character }: { character: Character }) {
     const prior = loadHistory(character.id);
     if (prior && prior.length > 0) setMessages(prior);
     setUsage(getTodayCount());
+    // Reset session id on character change — realtime subscription
+    // effect will re-populate from the next /api/chat/history call.
+    setSessionId(null);
   }, [character.id]);
 
   // ── DB-backed history sync ────────────────────────────────────────
@@ -754,73 +884,33 @@ export default function ChatClient({ character }: { character: Character }) {
             createdAt: number;
           }>;
           memorySummary: string | null;
+          /** Server returns the (user × character) session id so the
+           *  client can open a Supabase Realtime subscription filtered
+           *  to this session. null means no session exists yet. */
+          sessionId: string | null;
         };
         if (!alive) return;
 
+        // Capture session id for the realtime subscription effect.
+        if (data.sessionId) setSessionId(data.sessionId);
+
         if (data.messages.length > 0) {
-          // Server wins. Convert each DB row to its renderer-ready
-          // UIMessage shape, dispatching on `kind`. Phase B-2: image
-          // (셀카), song (날씨송), and product cards all hydrate
-          // along with text now.
-          const fromDb: UIMessage[] = data.messages.map((m): UIMessage => {
-            if (m.kind === 'image' && m.metadata?.kind === 'image') {
-              return {
+          // Server wins. Convert each DB row via the shared helper —
+          // same path the realtime subscription uses, so hydrate +
+          // live insert can never disagree about how a row maps to
+          // a UIMessage.
+          const fromDb: UIMessage[] = data.messages
+            .map((m) =>
+              buildUiMessageFromRow({
                 id: m.id,
                 role: m.role,
-                kind: 'image',
-                imageUrl: m.metadata.imageUrl,
+                modality: m.kind,
+                content: m.content,
+                metadata: m.metadata,
                 createdAt: m.createdAt,
-              };
-            }
-            if (m.kind === 'song' && m.metadata?.kind === 'song') {
-              const md = m.metadata;
-              return {
-                id: m.id,
-                role: m.role,
-                kind: 'music',
-                createdAt: m.createdAt,
-                music: {
-                  // taskId is for live polling; for restored history
-                  // we mark status=done with the audio URL on hand.
-                  // durationMs lives in DB metadata for future use
-                  // but MusicTrack doesn't expose it on the renderer
-                  // yet, so we drop it here.
-                  taskId: md.taskId ?? '',
-                  status: 'done',
-                  audioUrl: md.audioUrl,
-                  title: md.title,
-                  lyrics: md.lyrics,
-                },
-              };
-            }
-            if (m.kind === 'product' && m.metadata?.kind === 'product') {
-              const md = m.metadata;
-              return {
-                id: m.id,
-                role: m.role,
-                kind: 'product',
-                createdAt: m.createdAt,
-                product: {
-                  campaignId: md.campaignId,
-                  productId: md.productId,
-                  title: md.title,
-                  price: md.price,
-                  currency: md.currency,
-                  imageUrl: md.imageUrl,
-                  ctaUrl: md.ctaUrl,
-                },
-              };
-            }
-            // Default = text. The metadata column is null for plain
-            // text rows.
-            return {
-              id: m.id,
-              role: m.role,
-              kind: 'text',
-              content: m.content,
-              createdAt: m.createdAt,
-            };
-          });
+              }),
+            )
+            .filter((m): m is UIMessage => m !== null);
           setMessages(fromDb);
         } else {
           // Server is empty. If THIS device has localStorage history,
@@ -869,6 +959,78 @@ export default function ChatClient({ character }: { character: Character }) {
       alive = false;
     };
   }, [character.id, account]);
+
+  // ── Realtime sync (Phase B-3) ─────────────────────────────────────
+  //
+  // Once we know the session id, open a Supabase Realtime channel
+  // filtered to INSERT events on `messages` where session_id matches.
+  // When PC-A sends a message that lands in the DB, PC-B's
+  // subscription fires and we append the bubble — no refresh needed.
+  //
+  // Deduplication: the client passes its own React-state UUIDs to
+  // /api/chat and /api/chat/attachment, so the DB row id matches
+  // what we already have in `messages[]`. The realtime echo of THIS
+  // tab's own write hits `prev.some(m => m.id === row.id) === true`
+  // and gets skipped. Only writes from OTHER devices append.
+  //
+  // The subscription respects RLS — Supabase Realtime only delivers
+  // rows the authenticated client can SELECT, which by policy is
+  // "messages in sessions I own". So no cross-user leakage.
+  useEffect(() => {
+    if (!sessionId) return;
+    const supabase = getBrowserSupabase();
+    if (!supabase) return;
+
+    const channel = supabase
+      .channel(`messages-${sessionId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'INSERT',
+          schema: 'public',
+          table: 'messages',
+          filter: `session_id=eq.${sessionId}`,
+        },
+        (payload) => {
+          const row = payload.new as {
+            id: string;
+            role: 'user' | 'assistant';
+            modality: 'text' | 'image' | 'song' | 'product';
+            content: string | null;
+            metadata: AttachmentMetadataRow | null;
+            created_at: string;
+          };
+          if (!row.id) return;
+
+          // Convert DB row to UIMessage same way the hydrate effect
+          // does — dispatch on modality.
+          const built = buildUiMessageFromRow(row);
+          if (!built) return;
+
+          setMessages((prev) => {
+            // Skip our own echo: id already in state means this tab
+            // wrote the row.
+            if (prev.some((m) => m.id === built.id)) return prev;
+            // Also skip a pending placeholder with the same id (the
+            // assistant streaming bubble's id matches the DB row
+            // we'll insert at stream end). Replace it with the
+            // finalised content.
+            const idx = prev.findIndex((m) => m.id === built.id);
+            if (idx >= 0) {
+              const next = prev.slice();
+              next[idx] = built;
+              return next;
+            }
+            return [...prev, built];
+          });
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [sessionId]);
 
   // Load + subscribe to Supabase auth state. The admin email is
   // hard-coded in lib/supabase/identity.ts; the client UI keeps a
@@ -1439,6 +1601,7 @@ export default function ChatClient({ character }: { character: Character }) {
       // Mock-adapter path: full song ready in the kickoff response.
       // Persist immediately so the bubble survives device switches.
       void persistSongAttachment(character.id, {
+        id: songId,
         audioUrl: kickoff.audioUrl,
         title: kickoff.title,
         lyrics: kickoff.lyrics,
@@ -1499,6 +1662,7 @@ export default function ChatClient({ character }: { character: Character }) {
           // the card survives device switches.
           if (d.status === 'done' && d.audioUrl) {
             void persistSongAttachment(character.id, {
+              id: songId,
               audioUrl: d.audioUrl,
               title: d.title,
               lyrics: d.lyrics,
@@ -1677,6 +1841,13 @@ export default function ChatClient({ character }: { character: Character }) {
           locationHint,
           history,
           memorySummary,
+          // Pass the local UUIDs so the DB row ids match the chat
+          // client's React state. Realtime subscription on the other
+          // PC then receives INSERT events with the same ids and the
+          // client-side dedupe (Set<id>) can skip echoes of writes
+          // this very tab made.
+          userMessageId: userId,
+          assistantMessageId: assistantId,
         }),
       });
       // Pull quota state from response headers — every /api/chat
@@ -1851,16 +2022,17 @@ export default function ChatClient({ character }: { character: Character }) {
             );
             // Persist the selfie to the messages table so it shows
             // up on the user's other devices via the next
-            // /api/chat/history hydrate. Fire-and-forget; failure
-            // here just means this particular image won't survive
-            // a device switch (acceptable — the rest of the
-            // conversation still does).
+            // /api/chat/history hydrate AND the realtime
+            // subscription. Pass `id: imageId` so the DB row carries
+            // the same UUID as the local React state — the realtime
+            // echo on this same tab gets deduped by id-match.
             if (data.imageUrl) {
               void fetch('/api/chat/attachment', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'include',
                 body: JSON.stringify({
+                  id: imageId,
                   characterId: character.id,
                   metadata: {
                     kind: 'image',

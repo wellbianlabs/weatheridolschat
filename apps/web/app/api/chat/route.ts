@@ -59,6 +59,16 @@ interface ChatBody {
    * without us shipping all those tokens every request.
    */
   memorySummary?: string;
+  /**
+   * Pre-generated UUIDs for the user's turn and the assistant's
+   * reply. The client already needs IDs for its local React state
+   * before the request even fires; passing them through lets us
+   * store the DB rows with the SAME ids the client knows about,
+   * which lets the realtime subscription dedupe its own writes by
+   * id-match rather than fuzzy content comparison.
+   */
+  userMessageId?: string;
+  assistantMessageId?: string;
 }
 
 const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
@@ -268,8 +278,18 @@ export async function POST(req: Request): Promise<Response> {
     }
   }
 
-  const userMessageId = cryptoRandom();
-  const assistantMessageId = cryptoRandom();
+  // Prefer client-supplied UUIDs (Phase B-3 realtime dedup); fall
+  // back to a fresh server-generated one when the client didn't send
+  // them. The DB row id ends up the same as the client's local React
+  // state id, so a realtime INSERT echo can be deduped by id-match.
+  const userMessageId =
+    typeof body.userMessageId === 'string' && body.userMessageId
+      ? body.userMessageId
+      : cryptoRandom();
+  const assistantMessageId =
+    typeof body.assistantMessageId === 'string' && body.assistantMessageId
+      ? body.assistantMessageId
+      : cryptoRandom();
 
   // Track the assistant's accumulated text during the stream so we
   // can persist it after the loop ends. Stays empty for anon callers
@@ -505,11 +525,13 @@ export async function POST(req: Request): Promise<Response> {
         if (sessionId && assistantText.trim().length > 0) {
           const turns: PersistedTurn[] = [
             {
+              id: userMessageId,
               role: 'user',
               content: text,
               createdAt: userTurnCreatedAt,
             },
             {
+              id: assistantMessageId,
               role: 'assistant',
               content: assistantText,
               // +1ms so the assistant lands AFTER the user turn when

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-import { getSessionMemory, listRecentMessages } from '@/lib/messages';
+import { findSession, getSessionMemory, listRecentMessages } from '@/lib/messages';
 import { resolveUser } from '@/lib/supabase/identity';
 
 export const runtime = 'nodejs';
@@ -44,16 +44,21 @@ export async function GET(req: Request): Promise<Response> {
   const caller = await resolveUser();
   if (!caller) {
     // Quiet empty for anon — see file-header note.
-    return NextResponse.json({ messages: [], memorySummary: null });
+    return NextResponse.json({ messages: [], memorySummary: null, sessionId: null });
   }
 
   // Phase B-2 expansion: history now includes image/song/product
   // rows along with text. The chat client hydrates each by switching
   // on `kind` and rendering the appropriate bubble component.
-  const [messages, memorySummary] = await Promise.all([
+  //
+  // Phase B-3: sessionId is returned alongside so the chat client can
+  // open a Supabase Realtime subscription `session_id=eq.${sessionId}`
+  // and pick up INSERTs live (no polling).
+  const [messages, memorySummary, sessionId] = await Promise.all([
     listRecentMessages(caller.id, characterId, 50),
     getSessionMemory(caller.id, characterId),
+    findSession(caller.id, characterId),
   ]);
 
-  return NextResponse.json({ messages, memorySummary });
+  return NextResponse.json({ messages, memorySummary, sessionId });
 }
